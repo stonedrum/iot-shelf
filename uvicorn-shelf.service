@@ -1,0 +1,26 @@
+[Unit]
+Description=Uvicorn Service for IOTShelf
+After=network.target 
+#Documentation=none
+
+[Service]
+User=root
+Group=root
+
+WorkingDirectory=/var/shelf/iotshelf
+
+ExecStart=/bin/bash -c 'source ../venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8686'
+
+Restart=always
+RestartSec=5
+
+LimitNOFILE=65535
+
+StandardOutput=append:/var/shelf/iotshelf/uvicorn_full.log
+StandardError=append:/var/shelf/iotshelf/uvicorn_full.log
+
+Environment="PATH=/var/shelf/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+

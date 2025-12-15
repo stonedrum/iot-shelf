@@ -111,3 +111,4 @@ lerna-debug.log*
 .tern-port
 .vscode-test
 .yarn-integrity
+*.ini
