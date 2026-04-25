@@ -179,7 +179,7 @@ def parse_and_save_status(db, message_data):
                     if prev == "1" and curr == "0"
                 )
                 if down_edges > 0:
-                    shelf.current_quantity = max(0, shelf.current_quantity - down_edges)
+                    shelf.current_quantity = shelf.current_quantity - down_edges
             # 首帧仅初始化状态，不扣减
             shelf.last_switch_bitmap = switch_bitmap
         else:
@@ -187,8 +187,10 @@ def parse_and_save_status(db, message_data):
             shelf.current_quantity = snapshot_quantity
             shelf.last_switch_bitmap = None
 
-        # 双重兜底，确保库存不会落到负数
-        if shelf.current_quantity is None or shelf.current_quantity < 0:
+        # 兜底: 库存为空时设为0；货架设备仍限制不允许负数
+        if shelf.current_quantity is None:
+            shelf.current_quantity = 0
+        elif device_type != DEVICE_TYPE_TEA_BAR and shelf.current_quantity < 0:
             shelf.current_quantity = 0
 
         # 更新货架状态
