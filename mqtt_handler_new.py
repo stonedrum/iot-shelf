@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, F
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import configparser
 import os
 from dotenv import load_dotenv
@@ -21,6 +21,8 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+DEVICE_TYPE_SHELF = "shelf"
+DEVICE_TYPE_TEA_BAR = "tea_bar"
 
 # 读取配置文件
 config = configparser.ConfigParser()
@@ -86,6 +88,8 @@ class Shelf(Base):
     longitude = Column(Numeric(10, 6))
     latitude = Column(Numeric(10, 6))
     version = Column(String(20))
+    device_type = Column(String(20), default=DEVICE_TYPE_SHELF, nullable=False, comment="设备类型(shelf:货架,tea_bar:茶吧机)")
+    last_switch_bitmap = Column(String(8), nullable=True, comment="茶吧机上次8路开关状态位图")
     remark = Column(String(255), default="")
     station_id = Column(Integer, ForeignKey("stations.id"), nullable=False, index=True)
     created_by = Column(String(50), nullable=False)
@@ -116,6 +120,18 @@ def get_db():
     finally:
         db.close()
 
+
+def parse_switch_statuses(m_field: List[str]) -> List[int]:
+    statuses: List[int] = []
+    for index in range(4, 12):
+        raw_value = m_field[index] if index < len(m_field) else ""
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = 0
+        statuses.append(1 if parsed == 1 else 0)
+    return statuses
+
 def parse_and_save_status(db, message_data):
     """解析MQTT消息并更新货架状态"""
     try:
@@ -140,20 +156,44 @@ def parse_and_save_status(db, message_data):
         longitude = float(m_field[2].split(',')[0]) if len(m_field) > 2 and ',' in m_field[2] else None
         latitude = float(m_field[2].split(',')[1]) if len(m_field) > 2 and ',' in m_field[2] else None
         voltage = float(m_field[3]) if len(m_field) > 3 and m_field[3] else None
-        switch_statuses = [int(m_field[i]) for i in range(4, 12) if i < len(m_field) and m_field[i]]
+        switch_statuses = parse_switch_statuses(m_field)
         version = m_field[-1] if m_field else None
-        
-        # 计算当前数量（开关状态之和）
-        current_quantity = sum(switch_statuses)
-        
-        # 判断传送的current_quantity数据是否大于数据库记录的数据
-        if current_quantity > shelf.current_quantity:
-            shelf.delivery_status = 0
+
+        # 计算当前开关快照值（用于老设备）
+        snapshot_quantity = sum(switch_statuses)
+        switch_bitmap = "".join(str(value) for value in switch_statuses)
+        device_type = (shelf.device_type or DEVICE_TYPE_SHELF).strip().lower()
+
+        # 老设备: MQTT快照值直接覆盖当前库存
+        if device_type == DEVICE_TYPE_SHELF:
+            if snapshot_quantity > shelf.current_quantity:
+                shelf.delivery_status = 0
+            shelf.current_quantity = snapshot_quantity
+            shelf.last_switch_bitmap = None
+        # 新设备(茶吧机): 仅在1->0时扣减库存
+        elif device_type == DEVICE_TYPE_TEA_BAR:
+            prev_bitmap = shelf.last_switch_bitmap or ""
+            if len(prev_bitmap) == 8:
+                down_edges = sum(
+                    1 for prev, curr in zip(prev_bitmap, switch_bitmap)
+                    if prev == "1" and curr == "0"
+                )
+                if down_edges > 0:
+                    shelf.current_quantity = max(0, shelf.current_quantity - down_edges)
+            # 首帧仅初始化状态，不扣减
+            shelf.last_switch_bitmap = switch_bitmap
+        else:
+            logger.warning(f"货架 {iccid} 存在未知设备类型 {device_type}，按货架逻辑处理")
+            shelf.current_quantity = snapshot_quantity
+            shelf.last_switch_bitmap = None
+
+        # 双重兜底，确保库存不会落到负数
+        if shelf.current_quantity is None or shelf.current_quantity < 0:
+            shelf.current_quantity = 0
 
         # 更新货架状态
         shelf.online_status = 1  # 设置为在线
         shelf.voltage = voltage if voltage is not None else shelf.voltage
-        shelf.current_quantity = current_quantity
         shelf.signal_strength = signal_strength if signal_strength is not None else shelf.signal_strength
         shelf.version = version if version is not None else shelf.version
         shelf.updated_at = datetime.now()
@@ -170,7 +210,7 @@ def parse_and_save_status(db, message_data):
             shelf_id=shelf.id,
             shelf_name=shelf.iccid,
             log_time=datetime.now(),
-            current_quantity=current_quantity,
+            current_quantity=shelf.current_quantity,
             created_by="mqtt_handler",
             updated_by="mqtt_handler"
         )
@@ -180,7 +220,7 @@ def parse_and_save_status(db, message_data):
         db.refresh(shelf)
         db.refresh(shelf_log)
         
-        logger.info(f"成功更新货架 {iccid} 的状态，当前数量: {current_quantity}")
+        logger.info(f"成功更新货架 {iccid} 的状态，设备类型: {device_type}, 当前数量: {shelf.current_quantity}")
         return shelf
     except Exception as e:
         db.rollback()
