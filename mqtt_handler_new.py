@@ -153,6 +153,8 @@ def parse_and_save_status(db, message_data):
         
         # 构建状态数据
         signal_strength = int(m_field[0]) if len(m_field) > 0 and m_field[0] else None
+        # 流量卡号: m字段第1个"&"后到第2个"&"前
+        sim_card_number = m_field[1].strip() if len(m_field) > 1 and m_field[1] else None
         longitude = float(m_field[2].split(',')[0]) if len(m_field) > 2 and ',' in m_field[2] else None
         latitude = float(m_field[2].split(',')[1]) if len(m_field) > 2 and ',' in m_field[2] else None
         voltage = float(m_field[3]) if len(m_field) > 3 and m_field[3] else None
@@ -197,6 +199,7 @@ def parse_and_save_status(db, message_data):
         shelf.online_status = 1  # 设置为在线
         shelf.voltage = voltage if voltage is not None else shelf.voltage
         shelf.signal_strength = signal_strength if signal_strength is not None else shelf.signal_strength
+        shelf.sim_card_number = sim_card_number if sim_card_number is not None else shelf.sim_card_number
         shelf.version = version if version is not None else shelf.version
         shelf.updated_at = datetime.now()
         shelf.push_time = datetime.now()
