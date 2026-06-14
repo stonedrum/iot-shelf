@@ -1,6 +1,10 @@
 import json
 import time
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.header import Header
+from email.utils import formataddr
 import paho.mqtt.client as mqtt
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Numeric, ForeignKey, BigInteger, Boolean, func
 from sqlalchemy.ext.declarative import declarative_base
@@ -41,7 +45,14 @@ MQTT_PORT = config.getint('mqtt', 'port')
 MQTT_USER = config.get('mqtt', 'user')
 MQTT_PASSWORD = config.get('mqtt', 'password')
 MQTT_TOPIC = config.get('mqtt', 'topic')
-MQTT_CLIENT_ID = config.get('mqtt', 'client_id', fallback='water_shelf_client11')
+MQTT_CLIENT_ID = config.get('mqtt', 'client_id', fallback='water_shelf_client118')
+
+# 邮件配置
+SMTP_HOST = config.get('email', 'smtp_host', fallback='smtp.163.com')
+SMTP_PORT = config.getint('email', 'smtp_port', fallback=465)
+SMTP_USER = config.get('email', 'smtp_user', fallback='13735447734@163.com')
+SMTP_PASSWORD = config.get('email', 'smtp_password', fallback='')
+SMTP_SENDER_NAME = config.get('email', 'sender_name', fallback='搬夫科技')
 
 # 数据库连接
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
@@ -59,6 +70,7 @@ class Station(Base):
     remark = Column(String(255))
     contact_name = Column(String(50), nullable=False)
     contact_phone = Column(String(20), nullable=False)
+    email = Column(String(100), default="", nullable=False, comment="预警通知邮箱")
     created_by = Column(String(50), nullable=False)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_by = Column(String(50), nullable=False)
@@ -132,6 +144,48 @@ def parse_switch_statuses(m_field: List[str]) -> List[int]:
         statuses.append(1 if parsed == 1 else 0)
     return statuses
 
+
+def send_low_stock_alert_email(station, shelf):
+    """货架库存低于预警值时，向站点邮箱发送补货通知"""
+    to_email = (station.email or "").strip()
+    if not to_email:
+        logger.warning(f"站点 {station.station_name}(ID:{station.id}) 未配置邮箱，跳过预警邮件")
+        return False
+    if not SMTP_PASSWORD:
+        logger.warning("未配置邮件 SMTP 密码，跳过预警邮件发送")
+        return False
+
+    subject = f"【{SMTP_SENDER_NAME}】货架库存预警 - {shelf.iccid}"
+    body = (
+        f"尊敬的客户，您好！\n\n"
+        f"站点「{station.station_name}」下的货架设备当前余量不足，请及时安排补货。\n\n"
+        f"设备号（ICCID）：{shelf.iccid}\n"
+        f"产品名称：{shelf.product_name}\n"
+        f"安装地址：{shelf.address}\n"
+        f"当前余量：{shelf.current_quantity}\n"
+        f"预警阈值：{shelf.warning_quantity}\n"
+        f"建议补货数量：{shelf.order_quantity}\n\n"
+        f"当前库存已低于预警线，请尽快补货，避免缺货影响正常运营。\n\n"
+        f"—— {SMTP_SENDER_NAME}\n"
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["From"] = formataddr((str(Header(SMTP_SENDER_NAME, "utf-8")), SMTP_USER))
+        msg["To"] = to_email
+        msg["Subject"] = Header(subject, "utf-8")
+
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, [to_email], msg.as_string())
+
+        logger.info(f"已向 {to_email} 发送货架 {shelf.iccid} 库存预警邮件")
+        return True
+    except Exception as e:
+        logger.error(f"发送库存预警邮件失败: {str(e)}")
+        return False
+
 def parse_and_save_status(db, message_data):
     """解析MQTT消息并更新货架状态"""
     try:
@@ -160,6 +214,9 @@ def parse_and_save_status(db, message_data):
         voltage = float(m_field[3]) if len(m_field) > 3 and m_field[3] else None
         switch_statuses = parse_switch_statuses(m_field)
         version = m_field[-1] if m_field else None
+
+        prev_quantity = shelf.current_quantity
+        warning_quantity = shelf.warning_quantity
 
         # 计算当前开关快照值（用于老设备）
         snapshot_quantity = sum(switch_statuses)
@@ -224,6 +281,17 @@ def parse_and_save_status(db, message_data):
         db.commit()
         db.refresh(shelf)
         db.refresh(shelf_log)
+
+        # 库存从高于预警值降至预警值及以下时，发送邮件通知
+        is_low_stock = shelf.current_quantity <= warning_quantity
+        was_above_warning = prev_quantity > warning_quantity
+        if is_low_stock and was_above_warning:
+            station = db.query(Station).filter(
+                Station.id == shelf.station_id,
+                Station.is_deleted == 0
+            ).first()
+            if station:
+                send_low_stock_alert_email(station, shelf)
         
         logger.info(f"成功更新货架 {iccid} 的状态，设备类型: {device_type}, 当前数量: {shelf.current_quantity}")
         return shelf
