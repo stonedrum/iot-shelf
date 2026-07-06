@@ -160,6 +160,8 @@ def send_low_stock_alert_email(station, shelf):
         f"尊敬的客户，您好！\n\n"
         f"站点「{station.station_name}」下的货架设备当前余量不足，请及时安排补货。\n\n"
         f"设备号（ICCID）：{shelf.iccid}\n"
+        f"微信号：{shelf.wechat}\n"
+        f"电话：{shelf.phone}\n"
         f"产品名称：{shelf.product_name}\n"
         f"安装地址：{shelf.address}\n"
         f"当前余量：{shelf.current_quantity}\n"
