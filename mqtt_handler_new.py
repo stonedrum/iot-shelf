@@ -53,6 +53,7 @@ SMTP_PORT = config.getint('email', 'smtp_port', fallback=465)
 SMTP_USER = config.get('email', 'smtp_user', fallback='13735447734@163.com')
 SMTP_PASSWORD = config.get('email', 'smtp_password', fallback='')
 SMTP_SENDER_NAME = config.get('email', 'sender_name', fallback='搬夫科技')
+LOW_VOLTAGE_THRESHOLD = config.getfloat('email', 'low_voltage_threshold', fallback=36.1)
 
 # 数据库连接
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
@@ -155,25 +156,38 @@ def send_low_stock_alert_email(station, shelf):
         logger.warning("未配置邮件 SMTP 密码，跳过预警邮件发送")
         return False
 
+    voltage = float(shelf.voltage or 0)
+    if voltage < LOW_VOLTAGE_THRESHOLD:
+        voltage_html = (
+            f'<strong style="color:#d32f2f;">{voltage:.2f} V</strong>'
+            f' <span style="color:#d32f2f;">（低于阈值 {LOW_VOLTAGE_THRESHOLD}V）</span>'
+        )
+    else:
+        voltage_html = f"{voltage:.2f} V"
+
     subject = f"【{SMTP_SENDER_NAME}】货架库存预警 - {shelf.iccid}"
-    body = (
-        f"尊敬的客户，您好！\n\n"
-        f"站点「{station.station_name}」下的货架设备当前余量不足，请及时安排补货。\n\n"
-        f"设备号（ICCID）：{shelf.iccid}\n"
-        f"微信号：{shelf.wechat}\n"
-        f"电话：{shelf.phone}\n"
-        f"产品名称：{shelf.product_name}\n"
-        f"安装地址：{shelf.address}\n"
-        f"当前余量：{shelf.current_quantity}\n"
-        f"预警阈值：{shelf.warning_quantity}\n"
-        f"建议补货数量：{shelf.order_quantity}\n\n"
-        f"当前库存已低于预警线，请尽快补货，避免缺货影响正常运营。\n\n"
-        f"—— {SMTP_SENDER_NAME}\n"
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    body = f"""
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#333;">
+      <p>尊敬的客户，您好！</p>
+      <p>站点「{station.station_name}」下的货架设备当前余量不足，请及时安排补货。</p>
+      <p>
+        设备号（ICCID）：{shelf.iccid}<br>
+        微信号：{shelf.wechat}<br>
+        电话：{shelf.phone}<br>
+        产品名称：{shelf.product_name}<br>
+        安装地址：{shelf.address}<br>
+        当前余量：{shelf.current_quantity}<br>
+        预警阈值：{shelf.warning_quantity}<br>
+        建议补货数量：{shelf.order_quantity}<br>
+        当前电压：{voltage_html}
+      </p>
+      <p>当前库存已低于预警线，请尽快补货，避免缺货影响正常运营。</p>
+      <p>—— {SMTP_SENDER_NAME}<br>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+    """
 
     try:
-        msg = MIMEText(body, "plain", "utf-8")
+        msg = MIMEText(body, "html", "utf-8")
         msg["From"] = formataddr((str(Header(SMTP_SENDER_NAME, "utf-8")), SMTP_USER))
         msg["To"] = to_email
         msg["Subject"] = Header(subject, "utf-8")
