@@ -1,12 +1,16 @@
 import json
+import hashlib
 import time
 import logging
 import smtplib
+import urllib.request
+from uuid import uuid4
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
 import paho.mqtt.client as mqtt
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Numeric, ForeignKey, BigInteger, Boolean, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -54,6 +58,16 @@ SMTP_USER = config.get('email', 'smtp_user', fallback='13735447734@163.com')
 SMTP_PASSWORD = config.get('email', 'smtp_password', fallback='')
 SMTP_SENDER_NAME = config.get('email', 'sender_name', fallback='搬夫科技')
 LOW_VOLTAGE_THRESHOLD = config.getfloat('email', 'low_voltage_threshold', fallback=36.1)
+
+# 个推 RestAPI V2 配置（Master Secret 仅保存在服务端）
+GETUI_APP_ID = config.get('getui', 'app_id', fallback='').strip()
+GETUI_APP_KEY = config.get('getui', 'app_key', fallback='').strip()
+GETUI_MASTER_SECRET = config.get('getui', 'master_secret', fallback='').strip()
+GETUI_BASE_URL = config.get(
+    'getui', 'base_url', fallback='https://restapi.getui.com'
+).rstrip('/')
+_getui_auth_token = None
+_getui_auth_token_valid_until = 0.0
 
 # 数据库连接
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
@@ -125,6 +139,57 @@ class ShelfLog(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
     is_deleted = Column(Integer, default=0, nullable=False)
 
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    role = Column(String(20), nullable=False)
+    is_deleted = Column(Integer, default=0, nullable=False)
+
+
+class UserCity(Base):
+    __tablename__ = "user_cities"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    city_id = Column(Integer, nullable=False)
+    is_deleted = Column(Integer, default=0, nullable=False)
+
+
+class PushToken(Base):
+    __tablename__ = "push_tokens"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token = Column(String(255), unique=True, nullable=False)
+    enabled = Column(Integer, default=1, nullable=False)
+
+
+class WaterDeliveryOrder(Base):
+    __tablename__ = "water_delivery_orders"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    order_no = Column(String(40), unique=True, nullable=False)
+    shelf_id = Column(Integer, ForeignKey("shelves.id"), nullable=False)
+    station_id = Column(Integer, ForeignKey("stations.id"), nullable=False)
+    source = Column(String(20), nullable=False, default="auto")
+    status = Column(String(20), nullable=False, default="pending")
+    requested_quantity = Column(Integer, nullable=False)
+    delivered_quantity = Column(Integer)
+    trigger_quantity = Column(Integer, nullable=False)
+    stock_before_delivery = Column(Integer)
+    stock_after_delivery = Column(Integer)
+    active_key = Column(String(64), unique=True, nullable=True)
+    remark = Column(String(255), default="")
+    delivered_at = Column(DateTime)
+    delivered_by = Column(String(50))
+    created_by = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_by = Column(String(50), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    is_deleted = Column(Integer, default=0, nullable=False)
+
 # 数据库操作函数
 def get_db():
     db = SessionLocal()
@@ -178,7 +243,7 @@ def send_low_stock_alert_email(station, shelf):
         安装地址：{shelf.address}<br>
         当前余量：{shelf.current_quantity}<br>
         预警阈值：{shelf.warning_quantity}<br>
-        建议补货数量：{shelf.order_quantity}<br>
+        建议补货数量：{max(int(shelf.total_quantity or 0) - int(shelf.current_quantity or 0), 1)}<br>
         当前电压：{voltage_html}
       </p>
       <p>当前库存已低于预警线，请尽快补货，避免缺货影响正常运营。</p>
@@ -201,6 +266,182 @@ def send_low_stock_alert_email(station, shelf):
     except Exception as e:
         logger.error(f"发送库存预警邮件失败: {str(e)}")
         return False
+
+
+def create_auto_water_order(db, shelf):
+    """低库存时创建订单；每个货架最多保留一张待配送订单。"""
+    active_key = f"shelf:{shelf.id}"
+    existing = db.query(WaterDeliveryOrder).filter(
+        WaterDeliveryOrder.active_key == active_key,
+        WaterDeliveryOrder.is_deleted == 0
+    ).first()
+    if existing:
+        return None
+
+    order = WaterDeliveryOrder(
+        order_no=f"WS{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid4().hex[:6].upper()}",
+        shelf_id=shelf.id,
+        station_id=shelf.station_id,
+        source="auto",
+        status="pending",
+        requested_quantity=max(int(shelf.total_quantity or 0) - int(shelf.current_quantity or 0), 1),
+        trigger_quantity=shelf.current_quantity,
+        active_key=active_key,
+        remark="库存达到预警值，MQTT自动生成",
+        created_by="mqtt_handler",
+        updated_by="mqtt_handler"
+    )
+    try:
+        # 使用保存点处理多个MQTT实例同时建单造成的唯一键冲突，
+        # 冲突不会回滚本次库存与货架日志更新。
+        with db.begin_nested():
+            db.add(order)
+            db.flush()
+        return order
+    except IntegrityError:
+        logger.info(f"货架 {shelf.iccid} 已由其他进程生成待配送订单")
+        return None
+
+
+def get_getui_auth_token():
+    """获取并缓存个推 RestAPI V2 鉴权 token。"""
+    global _getui_auth_token, _getui_auth_token_valid_until
+    if not all((GETUI_APP_ID, GETUI_APP_KEY, GETUI_MASTER_SECRET)):
+        logger.warning("未配置个推服务端参数，跳过 App 推送")
+        return None
+    if _getui_auth_token and time.monotonic() < _getui_auth_token_valid_until:
+        return _getui_auth_token
+
+    timestamp = str(int(time.time() * 1000))
+    sign = hashlib.sha256(
+        f"{GETUI_APP_KEY}{timestamp}{GETUI_MASTER_SECRET}".encode("utf-8")
+    ).hexdigest()
+    try:
+        request = urllib.request.Request(
+            f"{GETUI_BASE_URL}/v2/{GETUI_APP_ID}/auth",
+            data=json.dumps({
+                "sign": sign,
+                "timestamp": timestamp,
+                "appkey": GETUI_APP_KEY
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("code") != 0 or not result.get("data", {}).get("token"):
+            logger.error(f"个推鉴权失败: {result}")
+            return None
+        _getui_auth_token = result["data"]["token"]
+        _getui_auth_token_valid_until = time.monotonic() + 23 * 60 * 60
+        return _getui_auth_token
+    except Exception as error:
+        logger.error(f"个推鉴权请求失败: {error}")
+        return None
+
+
+def send_getui_to_cid(cid, title, body, payload):
+    token = get_getui_auth_token()
+    if not token:
+        return False
+
+    payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    message = {
+        "request_id": uuid4().hex,
+        "settings": {"ttl": 24 * 60 * 60 * 1000},
+        "audience": {"cid": [cid]},
+        "push_message": {
+            "notification": {
+                "title": title,
+                "body": body,
+                "click_type": "payload",
+                "payload": payload_text,
+                "channel_id": "water_orders",
+                "channel_name": "送水订单",
+                "channel_level": 4
+            }
+        },
+        "push_channel": {
+            "android": {
+                "ups": {
+                    "notification": {
+                        "title": title,
+                        "body": body,
+                        "click_type": "payload",
+                        "payload": payload_text
+                    }
+                }
+            },
+            "ios": {
+                "type": "notify",
+                "aps": {
+                    "alert": {"title": title, "body": body},
+                    "content-available": 0,
+                    "sound": "default"
+                },
+                "auto_badge": "+1",
+                "payload": payload_text
+            }
+        }
+    }
+    try:
+        request = urllib.request.Request(
+            f"{GETUI_BASE_URL}/v2/{GETUI_APP_ID}/push/single/cid",
+            data=json.dumps(message, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "token": token},
+            method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("code") != 0:
+            logger.error(f"个推 CID {cid} 推送失败: {result}")
+            return False
+        return True
+    except Exception as error:
+        logger.error(f"个推 CID {cid} 推送请求失败: {error}")
+        return False
+
+
+def send_new_order_push(db, station, shelf, order):
+    """通过个推提醒有权限的 App 用户。"""
+    allowed_user_ids = {
+        user.id for user in db.query(User).filter(
+            User.role == "admin",
+            User.is_deleted == 0
+        ).all()
+    }
+    allowed_user_ids.update(
+        row.user_id for row in db.query(UserCity).filter(
+            UserCity.city_id == station.city_id,
+            UserCity.is_deleted == 0
+        ).all()
+    )
+    if not allowed_user_ids:
+        return
+
+    tokens = db.query(PushToken).filter(
+        PushToken.user_id.in_(allowed_user_ids),
+        PushToken.enabled == 1
+    ).all()
+    if not tokens:
+        return
+
+    title = "新的送水订单"
+    body = f"{station.station_name} · {shelf.iccid} 当前余量 {shelf.current_quantity}"
+    payload = {
+        "type": "water_order",
+        "orderId": order.id,
+        "orderNo": order.order_no
+    }
+    success_count = sum(
+        send_getui_to_cid(token.token, title, body, payload)
+        for token in tokens
+        if token.token and token.token.strip()
+    )
+    logger.info(
+        f"新订单 {order.order_no} 已通过个推发送到 {success_count} 台设备"
+    )
+
 
 def parse_and_save_status(db, message_data):
     """解析MQTT消息并更新货架状态"""
@@ -292,22 +533,31 @@ def parse_and_save_status(db, message_data):
             created_by="mqtt_handler",
             updated_by="mqtt_handler"
         )
-        
+
+        is_low_stock = shelf.current_quantity <= warning_quantity
+        quantity_decreased = shelf.current_quantity < prev_quantity
+        new_order = None
+        if is_low_stock and quantity_decreased:
+            new_order = create_auto_water_order(db, shelf)
+
         db.add(shelf_log)
         db.commit()
         db.refresh(shelf)
         db.refresh(shelf_log)
 
-        # 库存从高于预警值降至预警值及以下时，发送邮件通知
-        is_low_stock = shelf.current_quantity <= warning_quantity
-        was_above_warning = prev_quantity > warning_quantity
-        if is_low_stock and was_above_warning:
+        # 库存预警邮件:
+        # 1) 首次跌破预警线时通知
+        # 2) 已处于预警线及以下时，余量每再减少一次也再次通知
+        if is_low_stock and quantity_decreased:
             station = db.query(Station).filter(
                 Station.id == shelf.station_id,
                 Station.is_deleted == 0
             ).first()
             if station:
                 send_low_stock_alert_email(station, shelf)
+                if new_order:
+                    db.refresh(new_order)
+                    send_new_order_push(db, station, shelf, new_order)
         
         logger.info(f"成功更新货架 {iccid} 的状态，设备类型: {device_type}, 当前数量: {shelf.current_quantity}")
         return shelf

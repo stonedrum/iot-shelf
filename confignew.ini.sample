@@ -39,3 +39,10 @@ smtp_port = 465
 smtp_user = your_email@163.com
 smtp_password = your_smtp_authorization_code
 sender_name = 搬夫科技
+
+# 个推服务端配置（请勿把真实 Master Secret 提交到仓库）
+[getui]
+app_id = your_getui_app_id
+app_key = your_getui_app_key
+master_secret = your_getui_master_secret
+base_url = https://restapi.getui.com

@@ -1,0 +1,92 @@
+diff --git a/node_modules/react-native-getui/ios/RCTGetuiModule/RCTGetuiModule/RCTGetuiModule.m b/node_modules/react-native-getui/ios/RCTGetuiModule/RCTGetuiModule/RCTGetuiModule.m
+index 9737b99..b801e2f 100755
+--- a/node_modules/react-native-getui/ios/RCTGetuiModule/RCTGetuiModule/RCTGetuiModule.m
++++ b/node_modules/react-native-getui/ios/RCTGetuiModule/RCTGetuiModule/RCTGetuiModule.m
+@@ -720,87 +720,3 @@ - (void)pushRegistry:(PKPushRegistry *)registry didReceiveIncomingPushWithPayloa
+ }
+ 
+ @end
+-
+-
+-// MyTurboModule.h// 报错'React/RCTTurboModule.h' file not found
+-#import <React/RCTBridgeModule.h>
+-//#import <React/RCTTurboModule.h>
+-
+-NS_ASSUME_NONNULL_BEGIN
+-
+-@interface MyTurboModule : NSObject <RCTTurboModule>
+-
+-// 同步方法示例
+-- (NSString *)getAppName;
+-
+-// 异步回调方法示例
+-- (void)fetchData:(RCTResponseSenderBlock)callback;
+-
+-// Promise 方法示例
+-- (void)fetchDataWithPromise:(RCTPromiseResolveBlock)resolve
+-                    rejecter:(RCTPromiseRejectBlock)reject;
+-
+-// 发送事件到 JS
+-- (void)sendEventToJS;
+-
+-@end
+-
+-NS_ASSUME_NONNULL_END
+-
+-
+-// MyTurboModule.m
+-//#import "MyTurboModule.h"
+-#import <React/RCTBridge.h>
+-#import <React/RCTEventDispatcher.h>
+-
+-@implementation MyTurboModule {
+-    RCTBridge *_bridge;
+-}
+-
+-// 初始化方法（新架构要求）
+-- (instancetype)initWithBridge:(RCTBridge *)bridge {
+-    if (self = [super init]) {
+-        _bridge = bridge;
+-    }
+-    return self;
+-}
+-
+-// 同步方法实现
+-- (NSString *)getAppName {
+-    return @"My RN App";
+-}
+-
+-// 异步回调方法实现
+-- (void)fetchData:(RCTResponseSenderBlock)callback {
+-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+-        // 模拟异步操作
+-        NSDictionary *data = @{@"key": @"value"};
+-        callback(@[NSNull.null, data]);
+-    });
+-}
+-
+-// Promise 方法实现
+-- (void)fetchDataWithPromise:(RCTPromiseResolveBlock)resolve
+-                    rejecter:(RCTPromiseRejectBlock)reject {
+-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+-        @try {
+-            // 模拟可能出错的操作
+-            NSDictionary *result = @{@"success": @YES};
+-            resolve(result);
+-        } @catch (NSException *exception) {
+-            reject(@"ERROR", exception.reason, exception);
+-        }
+-    });
+-}
+-
+-// 发送事件到 JS
+-- (void)sendEventToJS {
+-    NSString *eventName = @"MyCustomEvent";
+-    NSDictionary *eventData = @{@"message": @"Hello from Native"};
+-    [_bridge.eventDispatcher sendAppEventWithName:eventName body:eventData];
+-//    [_bridge.eventDispatcher sendEventWithName:eventName
+-//                                          body:eventData
+-//                                coalescingKey:nil];
+-}
+-
+-@end
