@@ -16,10 +16,12 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TextStyle,
   View,
 } from 'react-native';
 import {
   AuthExpiredError,
+  cancelOrder,
   createOrder,
   deliverOrder,
   getActiveOrder,
@@ -28,18 +30,35 @@ import {
   login,
   logout,
   restoreUser,
+  startDelivery,
+  updateOrderPayment,
 } from './src/api';
 import { setupPushNotifications } from './src/notifications';
-import { Shelf, User, WaterOrder } from './src/types';
+import { Shelf, User, WaterOrder, WaterOrderPaymentStatus } from './src/types';
 
-type Tab = 'pending' | 'shelves' | 'history' | 'more';
+type Tab = 'pending' | 'delivering' | 'shelves' | 'history' | 'more';
+type HistoryPaymentFilter = '' | 'unpaid' | 'paid';
+type HistoryResultFilter = '' | 'delivered' | 'cancelled';
 const PAGE_SIZE = 20;
 const SHELF_PAGE_SIZE = 10;
 const SHELF_SEARCH_DEBOUNCE_MS = 400;
 const APP_VERSION = '1.0.0';
-const ACCENT = '#e54d42';
+const ACCENT = '#2563eb';
+const DANGER = '#e54d42';
 const LOW_VOLTAGE_THRESHOLD = 36.1;
 const TOP_INSET = Platform.OS === 'android' ? (RNStatusBar.currentHeight ?? 0) : 0;
+
+const HISTORY_PAYMENT_OPTIONS: { value: HistoryPaymentFilter; label: string }[] = [
+  { value: '', label: '全部' },
+  { value: 'unpaid', label: '未支付' },
+  { value: 'paid', label: '已支付' },
+];
+
+const HISTORY_RESULT_OPTIONS: { value: HistoryResultFilter; label: string }[] = [
+  { value: '', label: '全部' },
+  { value: 'delivered', label: '已完成' },
+  { value: 'cancelled', label: '已取消' },
+];
 
 function formatVoltage(value?: number | null) {
   if (value == null || Number.isNaN(Number(value))) return '-';
@@ -58,6 +77,37 @@ function callShelf(phone?: string | null) {
   Linking.openURL(`tel:${dial}`).catch(() => {
     Alert.alert('无法拨打', '当前设备不能打开拨号盘');
   });
+}
+
+function openRidingNavigation(address?: string | null) {
+  const destination = (address || '').trim();
+  if (!destination) {
+    Alert.alert('无法导航', '该订单没有地址');
+    return;
+  }
+  const url = `baidumap://map/direction?destination=${encodeURIComponent(`name:${destination}`)}&mode=riding&src=andr.banfu.waterdelivery`;
+  Linking.openURL(url).catch(() => {
+    Alert.alert('无法导航', '请先安装百度地图');
+  });
+}
+
+function LabeledValue({
+  label,
+  value,
+  valueStyle,
+  onPress,
+}: {
+  label: string;
+  value: string;
+  valueStyle?: TextStyle;
+  onPress?: () => void;
+}) {
+  return (
+    <Text style={styles.fieldLabel}>
+      {label}{' '}
+      <Text style={[styles.fieldValue, valueStyle]} onPress={onPress}>{value}</Text>
+    </Text>
+  );
 }
 
 function formatDateTime(value: string) {
@@ -114,54 +164,146 @@ function LoginScreen({ onLogin }: { onLogin: (user: User) => void }) {
   );
 }
 
+function paymentLabel(status?: WaterOrderPaymentStatus | null) {
+  return status === 'paid' ? '已支付' : '未支付';
+}
+
+function FilterChipRow<T extends string>({
+  options,
+  value,
+  onChange,
+  compact = false,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (next: T) => void;
+  compact?: boolean;
+}) {
+  return (
+    <View style={[styles.filterChipRow, compact && styles.filterChipRowCompact]}>
+      {options.map(option => {
+        const active = value === option.value;
+        return (
+          <Pressable
+            key={option.label + String(option.value)}
+            style={[
+              styles.filterChip,
+              compact && styles.filterChipCompact,
+              active && styles.filterChipActive,
+            ]}
+            onPress={() => onChange(option.value)}
+          >
+            <Text
+              style={[
+                styles.filterChipText,
+                compact && styles.filterChipTextCompact,
+                active && styles.filterChipTextActive,
+              ]}
+            >
+              {option.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 function OrderCard({
   order,
+  onStartDelivery,
   onDeliver,
+  onCancel,
+  onTogglePayment,
+  showNavigation = true,
 }: {
   order: WaterOrder;
+  onStartDelivery?: (order: WaterOrder) => void;
   onDeliver?: (order: WaterOrder) => void;
+  onCancel?: (order: WaterOrder) => void;
+  onTogglePayment?: (order: WaterOrder) => void;
+  showNavigation?: boolean;
 }) {
   const phone = dialablePhone(order.shelf_phone);
+  const address = order.address || `${order.station_name || ''} ${order.shelf_iccid}`.trim();
+  const lowVoltage = Number(order.voltage) < LOW_VOLTAGE_THRESHOLD;
   return (
     <View style={styles.orderRow}>
       <Text style={styles.orderTime}>{formatDateTime(order.created_at)}</Text>
-      <Text style={styles.orderAddress}>
-        {order.address || `${order.station_name || ''} ${order.shelf_iccid}`.trim()}
-      </Text>
-      <Text style={styles.orderProduct}>
-        {order.product_name || '未命名产品'}*{order.requested_quantity};
-      </Text>
-      <Text style={styles.orderContact}>微信 {order.shelf_wechat || '-'}</Text>
-      {phone.dial ? (
-        <Pressable onPress={() => callShelf(order.shelf_phone)} hitSlop={6}>
-          <Text style={styles.orderPhone}>电话 {phone.display}</Text>
-        </Pressable>
-      ) : (
-        <Text style={styles.orderContact}>电话 -</Text>
-      )}
+      <View style={styles.addressRow}>
+        <Text style={styles.orderAddress}>{address || '暂无地址'}</Text>
+        {showNavigation ? (
+          <Pressable style={styles.navButton} onPress={() => openRidingNavigation(address)}>
+            <Text style={styles.navButtonText}>导航</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <LabeledValue
+        label="商品"
+        value={`${order.product_name || '未命名产品'}*${order.requested_quantity};`}
+      />
+      <LabeledValue label="微信" value={order.shelf_wechat || '-'} />
+      <LabeledValue
+        label="电话"
+        value={phone.display}
+        valueStyle={phone.dial ? styles.fieldValuePhone : undefined}
+        onPress={phone.dial ? () => callShelf(order.shelf_phone) : undefined}
+      />
       <View style={styles.orderFooter}>
         <View style={styles.orderStatus}>
-          <Text style={styles.orderMeta}>
-            {order.status === 'pending'
-              ? `触发余量 ${order.trigger_quantity}`
-              : order.delivered_quantity != null
-                ? `实送 ${order.delivered_quantity}`
+          {order.status === 'pending' || order.status === 'delivering' ? (
+            <LabeledValue label="触发余量" value={String(order.trigger_quantity)} valueStyle={styles.fieldValueAccent} />
+          ) : (
+            <Text style={styles.fieldLabel}>
+              {order.delivered_quantity != null
+                ? '实送 '
                 : order.status === 'delivered'
                   ? '已送达'
                   : '已取消'}
-          </Text>
-          <Text style={[
-            styles.orderContact,
-            Number(order.voltage) < LOW_VOLTAGE_THRESHOLD && styles.warningText,
-          ]}>
-            电压 {formatVoltage(order.voltage)}
-          </Text>
+              {order.delivered_quantity != null ? (
+                <Text style={styles.fieldValueAccent}>{order.delivered_quantity}</Text>
+              ) : null}
+            </Text>
+          )}
+          <LabeledValue
+            label="电压"
+            value={formatVoltage(order.voltage)}
+            valueStyle={lowVoltage ? styles.fieldValueWarning : undefined}
+          />
+          {onTogglePayment ? (
+            <Pressable onPress={() => onTogglePayment(order)} hitSlop={6}>
+              <Text style={styles.fieldLabel}>
+                支付{' '}
+                <Text style={order.payment_status === 'paid' ? styles.fieldValuePaid : styles.fieldValueUnpaid}>
+                  {paymentLabel(order.payment_status)}
+                </Text>
+              </Text>
+            </Pressable>
+          ) : (
+            <LabeledValue
+              label="支付"
+              value={paymentLabel(order.payment_status)}
+              valueStyle={order.payment_status === 'paid' ? styles.fieldValuePaid : styles.fieldValueUnpaid}
+            />
+          )}
         </View>
-        {onDeliver ? (
-          <Pressable style={styles.outlineButton} onPress={() => onDeliver(order)}>
-            <Text style={styles.outlineButtonText}>确认送达</Text>
-          </Pressable>
-        ) : null}
+        <View style={styles.orderActions}>
+          {onStartDelivery ? (
+            <Pressable style={styles.outlineButton} onPress={() => onStartDelivery(order)}>
+              <Text style={styles.outlineButtonText}>去配送</Text>
+            </Pressable>
+          ) : null}
+          {onDeliver ? (
+            <Pressable style={styles.outlineButton} onPress={() => onDeliver(order)}>
+              <Text style={styles.outlineButtonText}>确认送达</Text>
+            </Pressable>
+          ) : null}
+          {onCancel ? (
+            <Pressable style={styles.cancelOutlineButton} onPress={() => onCancel(order)}>
+              <Text style={styles.cancelOutlineButtonText}>取消</Text>
+            </Pressable>
+          ) : null}
+        </View>
       </View>
     </View>
   );
@@ -176,6 +318,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [deliveryOrder, setDeliveryOrder] = useState<WaterOrder | null>(null);
   const [deliveryQuantity, setDeliveryQuantity] = useState('');
+  const [deliveryPaymentStatus, setDeliveryPaymentStatus] = useState<WaterOrderPaymentStatus>('unpaid');
+  const [startDeliveryOrder, setStartDeliveryOrder] = useState<WaterOrder | null>(null);
+  const [startDeliveryPaymentStatus, setStartDeliveryPaymentStatus] = useState<WaterOrderPaymentStatus>('unpaid');
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [orderPage, setOrderPage] = useState(1);
   const [orderHasMore, setOrderHasMore] = useState(true);
@@ -185,6 +330,10 @@ export default function App() {
   const [shelfPage, setShelfPage] = useState(1);
   const [shelfHasMore, setShelfHasMore] = useState(true);
   const [shelfLoadingMore, setShelfLoadingMore] = useState(false);
+  const [historyPaymentFilter, setHistoryPaymentFilter] = useState<HistoryPaymentFilter>('');
+  const [historyResultFilter, setHistoryResultFilter] = useState<HistoryResultFilter>('');
+  const [historySearchDraft, setHistorySearchDraft] = useState('');
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
   const shelfSearchRequestId = useRef(0);
   const shelfLoadingMoreLock = useRef(false);
   const orderLoadingMoreLock = useRef(false);
@@ -197,6 +346,7 @@ export default function App() {
     setOrders([]);
     setShelves([]);
     setDeliveryOrder(null);
+    setStartDeliveryOrder(null);
   }, []);
 
   const handleRequestError = useCallback((error: unknown, fallbackTitle = '加载失败') => {
@@ -315,7 +465,7 @@ export default function App() {
   }, [user, shelfSearchQuery, shelfHasMore, handleRequestError]);
 
   const loadOrders = useCallback(async (page = 1, append = false) => {
-    if (!user || (tab !== 'pending' && tab !== 'history')) return;
+    if (!user || (tab !== 'pending' && tab !== 'delivering' && tab !== 'history')) return;
     const requestId = ++shelfSearchRequestId.current;
     if (append) {
       if (orderLoadingMoreLock.current || !orderHasMore) return;
@@ -326,7 +476,14 @@ export default function App() {
       setOrderHasMore(true);
     }
     try {
-      const result = await getOrders(tab, page, PAGE_SIZE);
+      const filters = tab === 'history'
+        ? {
+            paymentStatus: historyPaymentFilter,
+            result: historyResultFilter,
+            search: historySearchQuery,
+          }
+        : {};
+      const result = await getOrders(tab, page, PAGE_SIZE, filters);
       if (requestId !== shelfSearchRequestId.current) return;
       setOrders(prev => {
         if (!append) return result.orders;
@@ -346,7 +503,15 @@ export default function App() {
         orderLoadingMoreLock.current = false;
       }
     }
-  }, [tab, user, orderHasMore, handleRequestError]);
+  }, [
+    tab,
+    user,
+    orderHasMore,
+    historyPaymentFilter,
+    historyResultFilter,
+    historySearchQuery,
+    handleRequestError,
+  ]);
 
   useEffect(() => {
     if (!user || tab === 'more') return;
@@ -354,10 +519,17 @@ export default function App() {
       loadShelves(1, false);
       return;
     }
-    if (tab === 'pending' || tab === 'history') {
+    if (tab === 'pending' || tab === 'delivering' || tab === 'history') {
       loadOrders(1, false);
     }
-  }, [user, tab, shelfSearchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [
+    user,
+    tab,
+    shelfSearchQuery,
+    historyPaymentFilter,
+    historyResultFilter,
+    historySearchQuery,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadMoreShelves = () => {
     if (tab !== 'shelves' || loading || shelfLoadingMore || !shelfHasMore) return;
@@ -365,7 +537,7 @@ export default function App() {
   };
 
   const loadMoreOrders = () => {
-    if ((tab !== 'pending' && tab !== 'history') || loading || orderLoadingMore || !orderHasMore) return;
+    if ((tab !== 'pending' && tab !== 'delivering' && tab !== 'history') || loading || orderLoadingMore || !orderHasMore) return;
     loadOrders(orderPage + 1, true);
   };
 
@@ -386,6 +558,19 @@ export default function App() {
     Keyboard.dismiss();
   };
 
+  const applyHistorySearchNow = (value?: string) => {
+    const next = (value ?? historySearchDraft).trim();
+    setHistorySearchDraft(next);
+    setHistorySearchQuery(next);
+    Keyboard.dismiss();
+  };
+
+  const clearHistorySearch = () => {
+    setHistorySearchDraft('');
+    setHistorySearchQuery('');
+    Keyboard.dismiss();
+  };
+
   const finishDelivery = async () => {
     if (!deliveryOrder) return;
     const quantity = Number(deliveryQuantity);
@@ -394,9 +579,10 @@ export default function App() {
       return;
     }
     try {
-      await deliverOrder(deliveryOrder.id, quantity);
+      await deliverOrder(deliveryOrder.id, quantity, deliveryPaymentStatus);
       setDeliveryOrder(null);
       setDeliveryQuantity('');
+      setDeliveryPaymentStatus('unpaid');
       Alert.alert('完成', '订单已送达，货架余量已增加');
       loadOrders(1, false);
     } catch (error) {
@@ -404,12 +590,66 @@ export default function App() {
     }
   };
 
+  const handleStartDelivery = (order: WaterOrder) => {
+    setStartDeliveryOrder(order);
+    setStartDeliveryPaymentStatus(order.payment_status === 'paid' ? 'paid' : 'unpaid');
+  };
+
+  const confirmStartDelivery = async () => {
+    if (!startDeliveryOrder) return;
+    try {
+      await startDelivery(startDeliveryOrder.id, startDeliveryPaymentStatus);
+      setStartDeliveryOrder(null);
+      setTab('delivering');
+      Alert.alert('成功', '订单已进入配送中');
+    } catch (error) {
+      handleRequestError(error, '操作失败');
+    }
+  };
+
+  const handleCancelOrder = (order: WaterOrder) => {
+    Alert.alert('取消订单', `确认取消订单 ${order.order_no}？`, [
+      { text: '返回', style: 'cancel' },
+      {
+        text: '确认取消',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await cancelOrder(order.id);
+            Alert.alert('已取消', '订单已取消');
+            loadOrders(1, false);
+          } catch (error) {
+            handleRequestError(error, '取消失败');
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleTogglePayment = (order: WaterOrder) => {
+    const next: WaterOrderPaymentStatus = order.payment_status === 'paid' ? 'unpaid' : 'paid';
+    Alert.alert('修改支付状态', `确认将订单 ${order.order_no} 改为「${paymentLabel(next)}」？`, [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '确认',
+        onPress: async () => {
+          try {
+            await updateOrderPayment(order.id, next);
+            loadOrders(1, false);
+          } catch (error) {
+            handleRequestError(error, '更新失败');
+          }
+        },
+      },
+    ]);
+  };
+
   const handleShelfOrder = async (shelf: Shelf) => {
     try {
       const active = await getActiveOrder(shelf.id);
       if (active) {
-        setTab('pending');
-        Alert.alert('已有订单', `订单 ${active.order_no} 已在待配送列表中`);
+        setTab(active.status === 'delivering' ? 'delivering' : 'pending');
+        Alert.alert('已有订单', `订单 ${active.order_no} 已在${active.status === 'delivering' ? '配送中' : '待配送'}列表中`);
         return;
       }
       Alert.alert(
@@ -471,8 +711,9 @@ export default function App() {
       <View style={styles.tabs}>
         {([
           ['pending', '待配送'],
+          ['delivering', '配送中'],
+          ['history', '历史'],
           ['shelves', '货架'],
-          ['history', '历史订单'],
           ['more', '更多'],
         ] as [Tab, string][]).map(([value, label]) => {
           const active = tab === value;
@@ -590,49 +831,127 @@ export default function App() {
           />
         </View>
       ) : (
-        <FlatList
-          data={orders}
-          keyExtractor={item => String(item.id)}
-          refreshControl={
-            <RefreshControl
-              refreshing={loading && orders.length === 0}
-              onRefresh={() => loadOrders(1, false)}
-              colors={[ACCENT]}
-              tintColor={ACCENT}
-            />
-          }
-          contentContainerStyle={styles.list}
-          onEndReached={loadMoreOrders}
-          onEndReachedThreshold={0.3}
-          ListEmptyComponent={
-            !loading ? (
-              <Text style={styles.empty}>暂无订单</Text>
-            ) : (
-              <View style={styles.listLoading}>
-                <ActivityIndicator color={ACCENT} />
+        <View style={styles.ordersPane}>
+          {tab === 'history' ? (
+            <View style={styles.searchPanel}>
+              <View style={styles.filterBar}>
+                <FilterChipRow
+                  options={HISTORY_PAYMENT_OPTIONS}
+                  value={historyPaymentFilter}
+                  onChange={setHistoryPaymentFilter}
+                  compact
+                />
+                <View style={styles.filterDivider} />
+                <FilterChipRow
+                  options={HISTORY_RESULT_OPTIONS}
+                  value={historyResultFilter}
+                  onChange={setHistoryResultFilter}
+                  compact
+                />
               </View>
-            )
-          }
-          ListFooterComponent={
-            orderLoadingMore ? (
-              <View style={styles.listLoading}>
-                <ActivityIndicator color={ACCENT} />
-                <Text style={styles.muted}>加载更多…</Text>
+              <View style={styles.searchRow}>
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="地址、设备号、电话、微信"
+                  placeholderTextColor="#999"
+                  value={historySearchDraft}
+                  onChangeText={setHistorySearchDraft}
+                  returnKeyType="search"
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  clearButtonMode="never"
+                  onSubmitEditing={() => applyHistorySearchNow()}
+                />
+                {historySearchDraft.length > 0 ? (
+                  <Pressable style={styles.searchClear} onPress={clearHistorySearch} hitSlop={8}>
+                    <Text style={styles.searchClearText}>清除</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable style={styles.searchButton} onPress={() => applyHistorySearchNow()}>
+                  <Text style={styles.searchButtonText}>搜索</Text>
+                </Pressable>
               </View>
-            ) : orders.length > 0 && !orderHasMore ? (
-              <Text style={styles.listEnd}>已经到底了</Text>
-            ) : null
-          }
-          renderItem={({ item }) => (
-            <OrderCard
-              order={item}
-              onDeliver={tab === 'pending' ? order => {
-                setDeliveryOrder(order);
-                setDeliveryQuantity(String(order.requested_quantity));
-              } : undefined}
-            />
-          )}
-        />
+              <Text style={styles.searchHint}>
+                {(() => {
+                  const parts = [
+                    historyPaymentFilter === 'unpaid'
+                      ? '未支付'
+                      : historyPaymentFilter === 'paid'
+                        ? '已支付'
+                        : null,
+                    historyResultFilter === 'delivered'
+                      ? '已完成'
+                      : historyResultFilter === 'cancelled'
+                        ? '已取消'
+                        : null,
+                    historySearchQuery ? `「${historySearchQuery}」` : null,
+                  ].filter(Boolean);
+                  const prefix = parts.length > 0 ? `${parts.join(' · ')} ` : '';
+                  if (loading && orders.length === 0) {
+                    return parts.length > 0 ? `正在筛选${prefix}…` : '加载中…';
+                  }
+                  if (orderHasMore) {
+                    return `${prefix}已加载 ${orders.length} 条，下滑继续加载`;
+                  }
+                  return `${prefix}共 ${orders.length} 条`;
+                })()}
+              </Text>
+            </View>
+          ) : null}
+          <FlatList
+            data={orders}
+            keyExtractor={item => String(item.id)}
+            keyboardShouldPersistTaps="handled"
+            refreshControl={
+              <RefreshControl
+                refreshing={loading && orders.length === 0}
+                onRefresh={() => loadOrders(1, false)}
+                colors={[ACCENT]}
+                tintColor={ACCENT}
+              />
+            }
+            contentContainerStyle={styles.list}
+            onEndReached={loadMoreOrders}
+            onEndReachedThreshold={0.3}
+            ListEmptyComponent={
+              !loading ? (
+                <Text style={styles.empty}>
+                  {tab === 'history' && (historyPaymentFilter || historyResultFilter || historySearchQuery)
+                    ? '未找到匹配的历史订单，试试换个条件'
+                    : '暂无订单'}
+                </Text>
+              ) : (
+                <View style={styles.listLoading}>
+                  <ActivityIndicator color={ACCENT} />
+                </View>
+              )
+            }
+            ListFooterComponent={
+              orderLoadingMore ? (
+                <View style={styles.listLoading}>
+                  <ActivityIndicator color={ACCENT} />
+                  <Text style={styles.muted}>加载更多…</Text>
+                </View>
+              ) : orders.length > 0 && !orderHasMore ? (
+                <Text style={styles.listEnd}>已经到底了</Text>
+              ) : null
+            }
+            renderItem={({ item }) => (
+              <OrderCard
+                order={item}
+                showNavigation={tab !== 'history'}
+                onStartDelivery={tab === 'pending' ? handleStartDelivery : undefined}
+                onDeliver={tab === 'delivering' ? order => {
+                  setDeliveryOrder(order);
+                  setDeliveryQuantity(String(order.requested_quantity));
+                  setDeliveryPaymentStatus(order.payment_status === 'paid' ? 'paid' : 'unpaid');
+                } : undefined}
+                onCancel={tab === 'pending' || tab === 'delivering' ? handleCancelOrder : undefined}
+                onTogglePayment={tab === 'history' ? handleTogglePayment : undefined}
+              />
+            )}
+          />
+        </View>
       )}
 
       <Modal visible={!!deliveryOrder} transparent animationType="slide" onRequestClose={() => setDeliveryOrder(null)}>
@@ -652,20 +971,18 @@ export default function App() {
               <Text style={styles.orderProduct}>
                 {deliveryOrder?.station_name} · {deliveryOrder?.product_name || '-'} · {deliveryOrder?.shelf_iccid}
               </Text>
-              <Text style={styles.orderContact}>微信 {deliveryOrder?.shelf_wechat || '-'}</Text>
-              {dialablePhone(deliveryOrder?.shelf_phone).dial ? (
-                <Pressable onPress={() => callShelf(deliveryOrder?.shelf_phone)} hitSlop={6}>
-                  <Text style={styles.orderPhone}>电话 {dialablePhone(deliveryOrder?.shelf_phone).display}</Text>
-                </Pressable>
-              ) : (
-                <Text style={styles.orderContact}>电话 -</Text>
-              )}
-              <Text style={[
-                styles.orderContact,
-                Number(deliveryOrder?.voltage) < LOW_VOLTAGE_THRESHOLD && styles.warningText,
-              ]}>
-                电压 {formatVoltage(deliveryOrder?.voltage)}
-              </Text>
+              <LabeledValue label="微信" value={deliveryOrder?.shelf_wechat || '-'} />
+              <LabeledValue
+                label="电话"
+                value={dialablePhone(deliveryOrder?.shelf_phone).display}
+                valueStyle={dialablePhone(deliveryOrder?.shelf_phone).dial ? styles.fieldValuePhone : undefined}
+                onPress={dialablePhone(deliveryOrder?.shelf_phone).dial ? () => callShelf(deliveryOrder?.shelf_phone) : undefined}
+              />
+              <LabeledValue
+                label="电压"
+                value={formatVoltage(deliveryOrder?.voltage)}
+                valueStyle={Number(deliveryOrder?.voltage) < LOW_VOLTAGE_THRESHOLD ? styles.fieldValueWarning : undefined}
+              />
               <Text style={styles.label}>本次送水数量</Text>
               <Text style={styles.quantityPreview}>
                 {deliveryQuantity.trim() ? deliveryQuantity : '—'}
@@ -688,6 +1005,21 @@ export default function App() {
                   });
                 }}
               />
+              <Text style={styles.label}>支付状态</Text>
+              <View style={styles.paymentChoices}>
+                <Pressable
+                  style={[styles.paymentChoice, deliveryPaymentStatus === 'unpaid' && styles.paymentChoiceActive]}
+                  onPress={() => setDeliveryPaymentStatus('unpaid')}
+                >
+                  <Text style={[styles.paymentChoiceText, deliveryPaymentStatus === 'unpaid' && styles.paymentChoiceTextActive]}>未支付</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.paymentChoice, deliveryPaymentStatus === 'paid' && styles.paymentChoiceActive]}
+                  onPress={() => setDeliveryPaymentStatus('paid')}
+                >
+                  <Text style={[styles.paymentChoiceText, deliveryPaymentStatus === 'paid' && styles.paymentChoiceTextActive]}>已支付</Text>
+                </Pressable>
+              </View>
               <Text style={styles.muted}>点击输入框会选中当前数量，直接输入即可覆盖。</Text>
               <View style={styles.modalActions}>
                 <Pressable
@@ -701,6 +1033,54 @@ export default function App() {
                 </Pressable>
                 <Pressable style={[styles.solidButton, styles.flexButton]} onPress={finishDelivery}>
                   <Text style={styles.solidButtonText}>确认送达</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={!!startDeliveryOrder}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setStartDeliveryOrder(null)}
+      >
+        <View style={styles.modalAvoider}>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setStartDeliveryOrder(null)}
+          >
+            <Pressable
+              style={styles.modal}
+              onPress={event => event.stopPropagation()}
+            >
+              <Text style={styles.modalTitle}>去配送</Text>
+              <Text style={styles.orderProduct}>
+                {startDeliveryOrder?.station_name} · {startDeliveryOrder?.product_name || '-'} · {startDeliveryOrder?.shelf_iccid}
+              </Text>
+              <Text style={styles.muted}>确认开始配送订单 {startDeliveryOrder?.order_no}？</Text>
+              <Text style={styles.label}>支付状态</Text>
+              <View style={styles.paymentChoices}>
+                <Pressable
+                  style={[styles.paymentChoice, startDeliveryPaymentStatus === 'unpaid' && styles.paymentChoiceActive]}
+                  onPress={() => setStartDeliveryPaymentStatus('unpaid')}
+                >
+                  <Text style={[styles.paymentChoiceText, startDeliveryPaymentStatus === 'unpaid' && styles.paymentChoiceTextActive]}>未支付</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.paymentChoice, startDeliveryPaymentStatus === 'paid' && styles.paymentChoiceActive]}
+                  onPress={() => setStartDeliveryPaymentStatus('paid')}
+                >
+                  <Text style={[styles.paymentChoiceText, startDeliveryPaymentStatus === 'paid' && styles.paymentChoiceTextActive]}>已支付</Text>
+                </Pressable>
+              </View>
+              <View style={styles.modalActions}>
+                <Pressable style={styles.cancelButton} onPress={() => setStartDeliveryOrder(null)}>
+                  <Text style={styles.cancelButtonText}>取消</Text>
+                </Pressable>
+                <Pressable style={[styles.solidButton, styles.flexButton]} onPress={confirmStartDelivery}>
+                  <Text style={styles.solidButtonText}>确认去配送</Text>
                 </Pressable>
               </View>
             </Pressable>
@@ -732,11 +1112,12 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 0,
   },
-  tabText: { color: '#666', fontSize: 15, fontWeight: '500', paddingBottom: 10 },
+  tabText: { color: '#666', fontSize: 13, fontWeight: '500', paddingBottom: 10 },
   activeTabText: { color: ACCENT, fontWeight: '700' },
   tabUnderline: { alignSelf: 'stretch', height: 2, backgroundColor: 'transparent' },
   activeTabUnderline: { backgroundColor: ACCENT },
   shelvesPane: { flex: 1 },
+  ordersPane: { flex: 1 },
   searchPanel: {
     backgroundColor: '#fff',
     paddingHorizontal: 12,
@@ -746,6 +1127,40 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e5e5e5',
     gap: 6,
   },
+  filterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 8,
+  },
+  filterDivider: {
+    width: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+    backgroundColor: '#d0d5dd',
+    marginHorizontal: 2,
+  },
+  filterChipRow: { flexDirection: 'row', gap: 8 },
+  filterChipRowCompact: { gap: 3, flexShrink: 1 },
+  filterChip: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#fafafa',
+  },
+  filterChipCompact: {
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  filterChipActive: {
+    borderColor: ACCENT,
+    backgroundColor: '#eff6ff',
+  },
+  filterChipText: { color: '#666', fontSize: 13, fontWeight: '500' },
+  filterChipTextCompact: { fontSize: 11, lineHeight: 14 },
+  filterChipTextActive: { color: ACCENT, fontWeight: '700' },
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   searchInput: {
     flex: 1,
@@ -779,20 +1194,36 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   orderTime: { color: '#999', fontSize: 13 },
-  orderAddress: { color: '#222', fontSize: 16, fontWeight: '700', lineHeight: 22 },
+  addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  orderAddress: { flex: 1, color: '#222', fontSize: 16, fontWeight: '700', lineHeight: 22 },
+  navButton: {
+    backgroundColor: ACCENT,
+    borderRadius: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: 1,
+  },
+  navButtonText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   orderProduct: { color: '#333', fontSize: 15, lineHeight: 21 },
+  fieldLabel: { color: '#666', fontSize: 14, lineHeight: 21, fontWeight: '400' },
+  fieldValue: { color: '#222', fontWeight: '700' },
+  fieldValueAccent: { color: ACCENT, fontWeight: '700' },
+  fieldValuePhone: { color: ACCENT, fontWeight: '700' },
+  fieldValueWarning: { color: DANGER, fontWeight: '700' },
+  fieldValuePaid: { color: '#059669', fontWeight: '700' },
+  fieldValueUnpaid: { color: '#d97706', fontWeight: '700' },
   orderContact: { color: '#666', fontSize: 13, lineHeight: 18 },
   orderPhone: { color: ACCENT, fontSize: 14, fontWeight: '700', lineHeight: 20 },
-  orderStatus: { flex: 1, gap: 2 },
+  orderStatus: { flex: 1, gap: 6 },
+  orderActions: { gap: 8, alignItems: 'stretch' },
   orderFooter: {
-    marginTop: 4,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     justifyContent: 'space-between',
     gap: 12,
   },
   orderMeta: { color: ACCENT, fontSize: 13, flex: 1 },
-  warningText: { color: ACCENT, fontWeight: '700' },
+  warningText: { color: DANGER, fontWeight: '700' },
   outlineButton: {
     borderWidth: 1,
     borderColor: ACCENT,
@@ -801,8 +1232,32 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     minWidth: 88,
     alignItems: 'center',
+    backgroundColor: '#eff6ff',
   },
   outlineButtonText: { color: ACCENT, fontWeight: '700', fontSize: 14 },
+  cancelOutlineButton: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    minWidth: 88,
+    alignItems: 'center',
+  },
+  cancelOutlineButtonText: { color: '#666', fontWeight: '600', fontSize: 14 },
+  paymentChoices: { flexDirection: 'row', gap: 10, marginTop: 4 },
+  paymentChoice: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  paymentChoiceActive: { borderColor: ACCENT, backgroundColor: '#eff6ff' },
+  paymentChoiceText: { color: '#666', fontWeight: '600' },
+  paymentChoiceTextActive: { color: ACCENT, fontWeight: '700' },
   solidButton: {
     backgroundColor: ACCENT,
     borderRadius: 8,

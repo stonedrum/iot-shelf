@@ -175,6 +175,7 @@ class WaterDeliveryOrder(Base):
     station_id = Column(Integer, ForeignKey("stations.id"), nullable=False)
     source = Column(String(20), nullable=False, default="auto")
     status = Column(String(20), nullable=False, default="pending")
+    payment_status = Column(String(20), nullable=False, default="unpaid")
     requested_quantity = Column(Integer, nullable=False)
     delivered_quantity = Column(Integer)
     trigger_quantity = Column(Integer, nullable=False)
@@ -284,6 +285,7 @@ def create_auto_water_order(db, shelf):
         station_id=shelf.station_id,
         source="auto",
         status="pending",
+        payment_status="unpaid",
         requested_quantity=max(int(shelf.total_quantity or 0) - int(shelf.current_quantity or 0), 1),
         trigger_quantity=shelf.current_quantity,
         active_key=active_key,

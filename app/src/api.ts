@@ -90,21 +90,72 @@ export async function restoreUser(): Promise<User | null> {
   }
 }
 
+export type OrderListFilters = {
+  paymentStatus?: 'unpaid' | 'paid' | '';
+  result?: 'delivered' | 'cancelled' | '';
+  search?: string;
+};
+
 export async function getOrders(
-  status: 'pending' | 'history',
+  status: 'pending' | 'delivering' | 'history',
   page: number = 1,
   pageSize: number = 20,
+  filters: OrderListFilters = {},
 ) {
   const skip = Math.max(0, (page - 1) * pageSize);
+  const params = new URLSearchParams({
+    status,
+    skip: String(skip),
+    limit: String(pageSize),
+  });
+  if (filters.paymentStatus === 'unpaid' || filters.paymentStatus === 'paid') {
+    params.set('payment_status', filters.paymentStatus);
+  }
+  if (filters.result === 'delivered' || filters.result === 'cancelled') {
+    params.set('result', filters.result);
+  }
+  const keyword = filters.search?.trim();
+  if (keyword) {
+    params.set('search', keyword);
+  }
   return request<{ orders: WaterOrder[]; total_count: number }>(
-    `/water-orders?status=${status}&skip=${skip}&limit=${pageSize}`,
+    `/water-orders?${params.toString()}`,
   );
 }
 
-export async function deliverOrder(orderId: number, deliveredQuantity: number) {
+export async function startDelivery(orderId: number, paymentStatus?: 'unpaid' | 'paid') {
+  return request<WaterOrder>(`/water-orders/${orderId}/start-delivery`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ...(paymentStatus ? { payment_status: paymentStatus } : {}),
+    }),
+  });
+}
+
+export async function deliverOrder(
+  orderId: number,
+  deliveredQuantity: number,
+  paymentStatus?: 'unpaid' | 'paid',
+) {
   return request<WaterOrder>(`/water-orders/${orderId}/deliver`, {
     method: 'POST',
-    body: JSON.stringify({ delivered_quantity: deliveredQuantity }),
+    body: JSON.stringify({
+      delivered_quantity: deliveredQuantity,
+      ...(paymentStatus ? { payment_status: paymentStatus } : {}),
+    }),
+  });
+}
+
+export async function updateOrderPayment(orderId: number, paymentStatus: 'unpaid' | 'paid') {
+  return request<WaterOrder>(`/water-orders/${orderId}/payment`, {
+    method: 'PATCH',
+    body: JSON.stringify({ payment_status: paymentStatus }),
+  });
+}
+
+export async function cancelOrder(orderId: number) {
+  return request<WaterOrder>(`/water-orders/${orderId}/cancel`, {
+    method: 'POST',
   });
 }
 

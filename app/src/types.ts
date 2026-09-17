@@ -4,13 +4,17 @@ export interface User {
   role: 'admin' | 'general';
 }
 
+export type WaterOrderStatus = 'pending' | 'delivering' | 'delivered' | 'cancelled';
+export type WaterOrderPaymentStatus = 'unpaid' | 'paid';
+
 export interface WaterOrder {
   id: number;
   order_no: string;
   shelf_id: number;
   station_id: number;
   source: 'auto' | 'manual';
-  status: 'pending' | 'delivered' | 'cancelled';
+  status: WaterOrderStatus;
+  payment_status: WaterOrderPaymentStatus;
   requested_quantity: number;
   delivered_quantity: number | null;
   trigger_quantity: number;
