@@ -15,6 +15,8 @@ export interface WaterOrder {
   source: 'auto' | 'manual';
   status: WaterOrderStatus;
   payment_status: WaterOrderPaymentStatus;
+  scheduled_at?: string | null;
+  remark?: string;
   requested_quantity: number;
   delivered_quantity: number | null;
   trigger_quantity: number;
@@ -44,6 +46,49 @@ export interface Shelf {
   warning_quantity: number;
   total_quantity: number;
   order_quantity: number;
+  station_id?: number;
   station_name?: string;
   city_name?: string;
+  device_type?: 'shelf' | 'tea_bar' | string;
+  voltage?: number | null;
+  online_status?: number | null;
+  delivery_status?: number | null;
+  payment_method?: string | null;
+  signal_strength?: number | null;
+  sim_card_number?: string | null;
+  sim_card_expiry?: string | null;
+  push_time?: string | null;
+  remark?: string | null;
+  version?: string | null;
+  longitude?: number | null;
+  latitude?: number | null;
 }
+
+export interface CityOption {
+  id: number;
+  city_name: string;
+}
+
+export interface StationOption {
+  id: number;
+  station_name: string;
+  city_id: number;
+}
+
+export type ShelfListQuery = {
+  search?: string;
+  cityId?: number | null;
+  stationId?: number | null;
+  deviceType?: '' | 'shelf' | 'tea_bar';
+  onlineStatus?: '' | '0' | '1';
+  deliveryStatus?: '' | '1' | '2';
+  paymentMethod?: string;
+  minQuantity?: string;
+  maxQuantity?: string;
+  lowStock?: boolean;
+  lowVoltage?: boolean;
+  simExpiry?: boolean;
+  lowSignal?: boolean;
+  page?: number;
+  pageSize?: number;
+};

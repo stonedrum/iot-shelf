@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -26,22 +27,24 @@ import {
   deliverOrder,
   getActiveOrder,
   getOrders,
-  getShelves,
+  clearAutoLogin,
+  getSavedLogin,
   login,
   logout,
   restoreUser,
+  tryAutoLogin,
   startDelivery,
   updateOrderPayment,
+  updateOrderSettings,
 } from './src/api';
 import { setupPushNotifications } from './src/notifications';
+import { ShelfPane } from './src/ShelfPane';
 import { Shelf, User, WaterOrder, WaterOrderPaymentStatus } from './src/types';
 
 type Tab = 'pending' | 'delivering' | 'shelves' | 'history' | 'more';
 type HistoryPaymentFilter = '' | 'unpaid' | 'paid';
 type HistoryResultFilter = '' | 'delivered' | 'cancelled';
 const PAGE_SIZE = 20;
-const SHELF_PAGE_SIZE = 10;
-const SHELF_SEARCH_DEBOUNCE_MS = 400;
 const APP_VERSION = '1.0.0';
 const ACCENT = '#2563eb';
 const DANGER = '#e54d42';
@@ -117,10 +120,60 @@ function formatDateTime(value: string) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function formatSchedule(value?: string | null) {
+  if (!value) return '无';
+  const text = formatDateTime(value);
+  return text.length >= 16 ? text.slice(0, 16) : text;
+}
+
+function scheduleParts(value?: string | null) {
+  if (!value) return { date: '', time: '' };
+  const text = formatDateTime(value);
+  return { date: text.slice(0, 10), time: text.slice(11, 16) };
+}
+
+function shiftDate(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatDatePart(date: Date) {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatTimePart(date: Date) {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function schedulePickerDate(dateText: string, timeText: string) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : shiftDate(0);
+  const time = /^\d{2}:\d{2}$/.test(timeText) ? timeText : '09:00';
+  const parsed = new Date(`${date}T${time}:00`);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 function LoginScreen({ onLogin }: { onLogin: (user: User) => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [autoLogin, setAutoLogin] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSavedLogin().then(saved => {
+      if (cancelled || !saved) return;
+      setUsername(saved.username);
+      setPassword(saved.password);
+      setAutoLogin(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async () => {
     if (!username.trim() || !password) {
@@ -129,7 +182,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: User) => void }) {
     }
     setLoading(true);
     try {
-      onLogin(await login(username.trim(), password));
+      onLogin(await login(username.trim(), password, autoLogin));
     } catch (error) {
       Alert.alert('登录失败', error instanceof Error ? error.message : '请稍后重试');
     } finally {
@@ -156,6 +209,12 @@ function LoginScreen({ onLogin }: { onLogin: (user: User) => void }) {
           onChangeText={setPassword}
           secureTextEntry
         />
+        <Pressable style={styles.rememberRow} onPress={() => setAutoLogin(value => !value)}>
+          <View style={[styles.checkbox, autoLogin && styles.checkboxOn]}>
+            {autoLogin ? <Text style={styles.checkboxMark}>✓</Text> : null}
+          </View>
+          <Text style={styles.rememberText}>自动登录</Text>
+        </Pressable>
         <Pressable style={styles.solidButton} onPress={submit} disabled={loading}>
           <Text style={styles.solidButtonText}>{loading ? '登录中...' : '登录'}</Text>
         </Pressable>
@@ -211,24 +270,29 @@ function FilterChipRow<T extends string>({
 
 function OrderCard({
   order,
+  alt = false,
   onStartDelivery,
   onDeliver,
   onCancel,
   onTogglePayment,
+  onEditSettings,
   showNavigation = true,
 }: {
   order: WaterOrder;
+  alt?: boolean;
   onStartDelivery?: (order: WaterOrder) => void;
   onDeliver?: (order: WaterOrder) => void;
   onCancel?: (order: WaterOrder) => void;
   onTogglePayment?: (order: WaterOrder) => void;
+  onEditSettings?: (order: WaterOrder) => void;
   showNavigation?: boolean;
 }) {
   const phone = dialablePhone(order.shelf_phone);
   const address = order.address || `${order.station_name || ''} ${order.shelf_iccid}`.trim();
   const lowVoltage = Number(order.voltage) < LOW_VOLTAGE_THRESHOLD;
+  const remark = (order.remark || '').trim();
   return (
-    <View style={styles.orderRow}>
+    <View style={[styles.orderRow, alt && styles.orderRowAlt]}>
       <Text style={styles.orderTime}>{formatDateTime(order.created_at)}</Text>
       <View style={styles.addressRow}>
         <Text style={styles.orderAddress}>{address || '暂无地址'}</Text>
@@ -248,6 +312,18 @@ function OrderCard({
         value={phone.display}
         valueStyle={phone.dial ? styles.fieldValuePhone : undefined}
         onPress={phone.dial ? () => callShelf(order.shelf_phone) : undefined}
+      />
+      <LabeledValue
+        label="预约配送"
+        value={formatSchedule(order.scheduled_at)}
+        valueStyle={onEditSettings ? styles.fieldValueAccent : undefined}
+        onPress={onEditSettings ? () => onEditSettings(order) : undefined}
+      />
+      <LabeledValue
+        label="订单备注"
+        value={remark || '无'}
+        valueStyle={onEditSettings ? styles.fieldValueAccent : undefined}
+        onPress={onEditSettings ? () => onEditSettings(order) : undefined}
       />
       <View style={styles.orderFooter}>
         <View style={styles.orderStatus}>
@@ -314,29 +390,31 @@ export default function App() {
   const [restoring, setRestoring] = useState(true);
   const [tab, setTab] = useState<Tab>('pending');
   const [orders, setOrders] = useState<WaterOrder[]>([]);
-  const [shelves, setShelves] = useState<Shelf[]>([]);
   const [loading, setLoading] = useState(false);
   const [deliveryOrder, setDeliveryOrder] = useState<WaterOrder | null>(null);
   const [deliveryQuantity, setDeliveryQuantity] = useState('');
   const [deliveryPaymentStatus, setDeliveryPaymentStatus] = useState<WaterOrderPaymentStatus>('unpaid');
   const [startDeliveryOrder, setStartDeliveryOrder] = useState<WaterOrder | null>(null);
   const [startDeliveryPaymentStatus, setStartDeliveryPaymentStatus] = useState<WaterOrderPaymentStatus>('unpaid');
+  const [settingsOrder, setSettingsOrder] = useState<WaterOrder | null>(null);
+  const [settingsDate, setSettingsDate] = useState('');
+  const [settingsTime, setSettingsTime] = useState('');
+  const [settingsRemark, setSettingsRemark] = useState('');
+  const [schedulePicker, setSchedulePicker] = useState<'date' | 'time' | null>(null);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [orderPage, setOrderPage] = useState(1);
   const [orderHasMore, setOrderHasMore] = useState(true);
   const [orderLoadingMore, setOrderLoadingMore] = useState(false);
-  const [shelfSearchDraft, setShelfSearchDraft] = useState('');
-  const [shelfSearchQuery, setShelfSearchQuery] = useState('');
-  const [shelfPage, setShelfPage] = useState(1);
-  const [shelfHasMore, setShelfHasMore] = useState(true);
-  const [shelfLoadingMore, setShelfLoadingMore] = useState(false);
   const [historyPaymentFilter, setHistoryPaymentFilter] = useState<HistoryPaymentFilter>('');
   const [historyResultFilter, setHistoryResultFilter] = useState<HistoryResultFilter>('');
   const [historySearchDraft, setHistorySearchDraft] = useState('');
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const shelfSearchRequestId = useRef(0);
-  const shelfLoadingMoreLock = useRef(false);
   const orderLoadingMoreLock = useRef(false);
+  const manualLogoutRef = useRef(false);
+  const reauthLock = useRef(false);
+  const userRef = useRef<User | null>(null);
+  const [autoLoginOn, setAutoLoginOn] = useState(false);
   const deliveryQuantityInputRef = useRef<TextInput>(null);
   const appStateRef = useRef(AppState.currentState);
 
@@ -344,14 +422,33 @@ export default function App() {
     setUser(null);
     setTab('pending');
     setOrders([]);
-    setShelves([]);
     setDeliveryOrder(null);
     setStartDeliveryOrder(null);
+    setSettingsOrder(null);
+    setSchedulePicker(null);
   }, []);
+
+  userRef.current = user;
 
   const handleRequestError = useCallback((error: unknown, fallbackTitle = '加载失败') => {
     if (error instanceof AuthExpiredError) {
-      handleAuthExpired();
+      if (manualLogoutRef.current || reauthLock.current) {
+        handleAuthExpired();
+        return;
+      }
+      reauthLock.current = true;
+      tryAutoLogin()
+        .then(nextUser => {
+          if (nextUser) {
+            setUser(nextUser);
+            setAutoLoginOn(true);
+            return;
+          }
+          handleAuthExpired();
+        })
+        .finally(() => {
+          reauthLock.current = false;
+        });
       return;
     }
     Alert.alert(fallbackTitle, error instanceof Error ? error.message : '请稍后重试');
@@ -359,11 +456,18 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    restoreUser()
-      .then(nextUser => {
-        if (cancelled) return;
-        setUser(nextUser);
-        setTab('pending');
+    (async () => {
+      const restored = await restoreUser();
+      const nextUser = restored ?? await tryAutoLogin();
+      if (cancelled) return;
+      const saved = nextUser ? await getSavedLogin() : null;
+      if (cancelled) return;
+      setUser(nextUser);
+      setAutoLoginOn(!!saved);
+      if (nextUser) setTab('pending');
+    })()
+      .catch(() => {
+        if (!cancelled) setUser(null);
       })
       .finally(() => {
         if (!cancelled) setRestoring(false);
@@ -377,15 +481,16 @@ export default function App() {
     const subscription = AppState.addEventListener('change', nextState => {
       const prev = appStateRef.current;
       appStateRef.current = nextState;
-      if (prev.match(/inactive|background/) && nextState === 'active') {
-        restoreUser().then(nextUser => {
-          if (!nextUser) {
-            handleAuthExpired();
-            return;
-          }
-          setUser(nextUser);
-        });
-      }
+      if (!prev.match(/inactive|background/) || nextState !== 'active') return;
+      if (manualLogoutRef.current || !userRef.current) return;
+      restoreUser().then(async nextUser => {
+        const resolved = nextUser ?? await tryAutoLogin();
+        if (!resolved) {
+          handleAuthExpired();
+          return;
+        }
+        setUser(resolved);
+      });
     });
     return () => subscription.remove();
   }, [handleAuthExpired]);
@@ -421,48 +526,6 @@ export default function App() {
       .catch(error => console.warn('个推注册失败', error));
     return () => removeListeners?.();
   }, [user]);
-
-  useEffect(() => {
-    const draft = shelfSearchDraft.trim();
-    if (draft === shelfSearchQuery) return;
-    const timer = setTimeout(() => {
-      setShelfSearchQuery(draft);
-    }, SHELF_SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [shelfSearchDraft, shelfSearchQuery]);
-
-  const loadShelves = useCallback(async (page = 1, append = false) => {
-    if (!user) return;
-    const requestId = ++shelfSearchRequestId.current;
-    if (append) {
-      if (shelfLoadingMoreLock.current || !shelfHasMore) return;
-      shelfLoadingMoreLock.current = true;
-      setShelfLoadingMore(true);
-    } else {
-      setLoading(true);
-      setShelfHasMore(true);
-    }
-    try {
-      const nextShelves = await getShelves(shelfSearchQuery, page, SHELF_PAGE_SIZE);
-      if (requestId !== shelfSearchRequestId.current) return;
-      setShelves(prev => {
-        if (!append) return nextShelves;
-        const seen = new Set(prev.map(item => item.id));
-        return [...prev, ...nextShelves.filter(item => !seen.has(item.id))];
-      });
-      setShelfPage(page);
-      setShelfHasMore(nextShelves.length >= SHELF_PAGE_SIZE);
-    } catch (error) {
-      if (requestId !== shelfSearchRequestId.current) return;
-      handleRequestError(error);
-    } finally {
-      if (requestId === shelfSearchRequestId.current) {
-        setLoading(false);
-        setShelfLoadingMore(false);
-        shelfLoadingMoreLock.current = false;
-      }
-    }
-  }, [user, shelfSearchQuery, shelfHasMore, handleRequestError]);
 
   const loadOrders = useCallback(async (page = 1, append = false) => {
     if (!user || (tab !== 'pending' && tab !== 'delivering' && tab !== 'history')) return;
@@ -514,27 +577,17 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!user || tab === 'more') return;
-    if (tab === 'shelves') {
-      loadShelves(1, false);
-      return;
-    }
+    if (!user || tab === 'more' || tab === 'shelves') return;
     if (tab === 'pending' || tab === 'delivering' || tab === 'history') {
       loadOrders(1, false);
     }
   }, [
     user,
     tab,
-    shelfSearchQuery,
     historyPaymentFilter,
     historyResultFilter,
     historySearchQuery,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const loadMoreShelves = () => {
-    if (tab !== 'shelves' || loading || shelfLoadingMore || !shelfHasMore) return;
-    loadShelves(shelfPage + 1, true);
-  };
 
   const loadMoreOrders = () => {
     if ((tab !== 'pending' && tab !== 'delivering' && tab !== 'history') || loading || orderLoadingMore || !orderHasMore) return;
@@ -543,19 +596,6 @@ export default function App() {
 
   const switchTab = (next: Tab) => {
     setTab(next);
-  };
-
-  const applyShelfSearchNow = (value?: string) => {
-    const next = (value ?? shelfSearchDraft).trim();
-    setShelfSearchDraft(next);
-    setShelfSearchQuery(next);
-    Keyboard.dismiss();
-  };
-
-  const clearShelfSearch = () => {
-    setShelfSearchDraft('');
-    setShelfSearchQuery('');
-    Keyboard.dismiss();
   };
 
   const applyHistorySearchNow = (value?: string) => {
@@ -604,6 +644,60 @@ export default function App() {
       Alert.alert('成功', '订单已进入配送中');
     } catch (error) {
       handleRequestError(error, '操作失败');
+    }
+  };
+
+  const openOrderSettings = (order: WaterOrder) => {
+    const parts = scheduleParts(order.scheduled_at);
+    setSchedulePicker(null);
+    setSettingsOrder(order);
+    setSettingsDate(parts.date);
+    setSettingsTime(parts.time);
+    setSettingsRemark(order.remark || '');
+  };
+
+  const onSchedulePicked = (event: DateTimePickerEvent, selected?: Date) => {
+    const mode = schedulePicker;
+    if (Platform.OS === 'android') setSchedulePicker(null);
+    if (event.type === 'dismissed' || !selected || !mode) return;
+    if (mode === 'date') {
+      setSettingsDate(formatDatePart(selected));
+      setSettingsTime(current => current || '09:00');
+      return;
+    }
+    setSettingsTime(formatTimePart(selected));
+    setSettingsDate(current => current || shiftDate(0));
+  };
+
+  const confirmOrderSettings = async () => {
+    if (!settingsOrder) return;
+    const date = settingsDate.trim();
+    const time = settingsTime.trim();
+    let scheduledAt: string | null = null;
+    if (date || time) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) {
+        Alert.alert('提示', '预约时间请填写日期和时间，或全部留空表示无');
+        return;
+      }
+      const [hour, minute] = time.split(':').map(Number);
+      if (hour > 23 || minute > 59 || Number.isNaN(new Date(`${date}T${time}:00`).getTime())) {
+        Alert.alert('提示', '预约时间无效');
+        return;
+      }
+      scheduledAt = `${date}T${time}:00`;
+    }
+    const remark = settingsRemark.trim();
+    if (remark.length > 255) {
+      Alert.alert('提示', '订单备注不能超过 255 字');
+      return;
+    }
+    try {
+      await updateOrderSettings(settingsOrder.id, scheduledAt, remark);
+      setSettingsOrder(null);
+      Keyboard.dismiss();
+      loadOrders(1, false);
+    } catch (error) {
+      handleRequestError(error, '保存失败');
     }
   };
 
@@ -683,6 +777,7 @@ export default function App() {
         text: '注销',
         style: 'destructive',
         onPress: async () => {
+          manualLogoutRef.current = true;
           await logout();
           setUser(null);
         },
@@ -697,8 +792,10 @@ export default function App() {
     return (
       <LoginScreen
         onLogin={nextUser => {
+          manualLogoutRef.current = false;
           setUser(nextUser);
           setTab('pending');
+          getSavedLogin().then(saved => setAutoLoginOn(!!saved));
         }}
       />
     );
@@ -731,6 +828,31 @@ export default function App() {
           <View style={styles.moreBody}>
             <Text style={styles.moreBrand}>搬夫送水</Text>
             <Text style={styles.moreLine}>当前登录：{user.username}</Text>
+            <Pressable
+              style={styles.autoLoginRow}
+              onPress={() => {
+                if (!autoLoginOn) {
+                  Alert.alert('自动登录', '退出后在登录页勾选「自动登录」，下次打开将直接进入');
+                  return;
+                }
+                Alert.alert('关闭自动登录', '关闭后下次打开需要重新输入密码', [
+                  { text: '取消', style: 'cancel' },
+                  {
+                    text: '关闭',
+                    style: 'destructive',
+                    onPress: async () => {
+                      await clearAutoLogin();
+                      setAutoLoginOn(false);
+                    },
+                  },
+                ]);
+              }}
+            >
+              <Text style={styles.moreLine}>自动登录</Text>
+              <Text style={autoLoginOn ? styles.autoLoginOn : styles.moreMeta}>
+                {autoLoginOn ? '已开启' : '未开启'}
+              </Text>
+            </Pressable>
             <Text style={styles.moreMeta}>版本号：v{APP_VERSION}</Text>
             <Text style={styles.moreMeta}>版权所有 ©搬夫科技</Text>
           </View>
@@ -739,97 +861,11 @@ export default function App() {
           </Pressable>
         </View>
       ) : tab === 'shelves' ? (
-        <View style={styles.shelvesPane}>
-          <View style={styles.searchPanel}>
-            <View style={styles.searchRow}>
-              <TextInput
-                style={styles.searchInput}
-                placeholder="设备号、电话、微信、地址、备注"
-                placeholderTextColor="#999"
-                value={shelfSearchDraft}
-                onChangeText={setShelfSearchDraft}
-                returnKeyType="search"
-                autoCorrect={false}
-                autoCapitalize="none"
-                clearButtonMode="never"
-                onSubmitEditing={() => applyShelfSearchNow()}
-              />
-              {shelfSearchDraft.length > 0 ? (
-                <Pressable style={styles.searchClear} onPress={clearShelfSearch} hitSlop={8}>
-                  <Text style={styles.searchClearText}>清除</Text>
-                </Pressable>
-              ) : null}
-              <Pressable style={styles.searchButton} onPress={() => applyShelfSearchNow()}>
-                <Text style={styles.searchButtonText}>搜索</Text>
-              </Pressable>
-            </View>
-            <Text style={styles.searchHint}>
-              {shelfSearchQuery
-                ? loading && shelves.length === 0
-                  ? `正在搜索「${shelfSearchQuery}」…`
-                  : `「${shelfSearchQuery}」已加载 ${shelves.length} 条${shelfHasMore ? '，继续下滑加载更多' : ''}`
-                : shelfHasMore
-                  ? `已加载 ${shelves.length} 条，下滑继续加载`
-                  : `共 ${shelves.length} 条货架`}
-            </Text>
-          </View>
-          <FlatList
-            data={shelves}
-            keyExtractor={item => String(item.id)}
-            keyboardShouldPersistTaps="handled"
-            refreshControl={
-              <RefreshControl
-                refreshing={loading && shelves.length === 0}
-                onRefresh={() => loadShelves(1, false)}
-                colors={[ACCENT]}
-                tintColor={ACCENT}
-              />
-            }
-            contentContainerStyle={styles.list}
-            onEndReached={loadMoreShelves}
-            onEndReachedThreshold={0.3}
-            ListEmptyComponent={
-              !loading ? (
-                <Text style={styles.empty}>
-                  {shelfSearchQuery ? '未找到匹配的货架，试试换个关键词' : '暂无货架'}
-                </Text>
-              ) : (
-                <View style={styles.listLoading}>
-                  <ActivityIndicator color={ACCENT} />
-                </View>
-              )
-            }
-            ListFooterComponent={
-              shelfLoadingMore ? (
-                <View style={styles.listLoading}>
-                  <ActivityIndicator color={ACCENT} />
-                  <Text style={styles.muted}>加载更多…</Text>
-                </View>
-              ) : shelves.length > 0 && !shelfHasMore ? (
-                <Text style={styles.listEnd}>已经到底了</Text>
-              ) : null
-            }
-            renderItem={({ item }) => (
-              <View style={styles.orderRow}>
-                <Text style={styles.orderAddress}>{item.product_name || '未命名产品'} · {item.iccid}</Text>
-                {(item.station_name || item.city_name) ? (
-                  <Text style={styles.orderProduct}>
-                    {[item.city_name, item.station_name].filter(Boolean).join(' · ')}
-                  </Text>
-                ) : null}
-                <Text style={styles.orderProduct}>{item.address || '暂无地址'}</Text>
-                <View style={styles.orderFooter}>
-                  <Text style={[styles.orderMeta, item.current_quantity <= item.warning_quantity && styles.warningText]}>
-                    余量 {item.current_quantity} / 预警 {item.warning_quantity}
-                  </Text>
-                  <Pressable style={styles.outlineButton} onPress={() => handleShelfOrder(item)}>
-                    <Text style={styles.outlineButtonText}>生成订单</Text>
-                  </Pressable>
-                </View>
-              </View>
-            )}
-          />
-        </View>
+        <ShelfPane
+          username={user.username}
+          onGenerateOrder={handleShelfOrder}
+          onError={handleRequestError}
+        />
       ) : (
         <View style={styles.ordersPane}>
           {tab === 'history' ? (
@@ -936,9 +972,10 @@ export default function App() {
                 <Text style={styles.listEnd}>已经到底了</Text>
               ) : null
             }
-            renderItem={({ item }) => (
+            renderItem={({ item, index }) => (
               <OrderCard
                 order={item}
+                alt={index % 2 === 1}
                 showNavigation={tab !== 'history'}
                 onStartDelivery={tab === 'pending' ? handleStartDelivery : undefined}
                 onDeliver={tab === 'delivering' ? order => {
@@ -948,6 +985,7 @@ export default function App() {
                 } : undefined}
                 onCancel={tab === 'pending' || tab === 'delivering' ? handleCancelOrder : undefined}
                 onTogglePayment={tab === 'history' ? handleTogglePayment : undefined}
+                onEditSettings={tab === 'pending' || tab === 'delivering' ? openOrderSettings : undefined}
               />
             )}
           />
@@ -1087,6 +1125,118 @@ export default function App() {
           </Pressable>
         </View>
       </Modal>
+
+      <Modal
+        visible={!!settingsOrder}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          setSchedulePicker(null);
+          setSettingsOrder(null);
+        }}
+      >
+        <View style={styles.modalAvoider}>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => {
+              Keyboard.dismiss();
+              setSchedulePicker(null);
+              setSettingsOrder(null);
+            }}
+          >
+            <Pressable
+              style={[styles.modal, { marginBottom: keyboardOffset }]}
+              onPress={event => event.stopPropagation()}
+            >
+              <Text style={styles.modalTitle}>预约与备注</Text>
+              <Text style={styles.orderProduct}>
+                {settingsOrder?.station_name} · {settingsOrder?.shelf_iccid}
+              </Text>
+              <Text style={styles.label}>预约配送时间</Text>
+              <View style={styles.scheduleChips}>
+                {[
+                  ['今天', 0],
+                  ['明天', 1],
+                  ['后天', 2],
+                ].map(([label, offset]) => (
+                  <Pressable
+                    key={String(label)}
+                    style={[styles.filterChip, styles.filterChipCompact]}
+                    onPress={() => {
+                      setSettingsDate(shiftDate(Number(offset)));
+                      if (!settingsTime) setSettingsTime('09:00');
+                    }}
+                  >
+                    <Text style={[styles.filterChipText, styles.filterChipTextCompact]}>{label}</Text>
+                  </Pressable>
+                ))}
+                <Pressable
+                  style={[styles.filterChip, styles.filterChipCompact]}
+                  onPress={() => {
+                    setSettingsDate('');
+                    setSettingsTime('');
+                  }}
+                >
+                  <Text style={[styles.filterChipText, styles.filterChipTextCompact]}>清除</Text>
+                </Pressable>
+              </View>
+              <View style={styles.scheduleInputs}>
+                <Pressable
+                  style={[styles.input, styles.scheduleDateInput, styles.schedulePicker]}
+                  onPress={() => setSchedulePicker('date')}
+                >
+                  <Text style={settingsDate ? styles.schedulePickerText : styles.schedulePickerPlaceholder}>
+                    {settingsDate || '选择日期'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.input, styles.scheduleTimeInput, styles.schedulePicker]}
+                  onPress={() => setSchedulePicker('time')}
+                >
+                  <Text style={settingsTime ? styles.schedulePickerText : styles.schedulePickerPlaceholder}>
+                    {settingsTime || '选择时间'}
+                  </Text>
+                </Pressable>
+              </View>
+              <Text style={styles.label}>订单备注</Text>
+              <TextInput
+                style={[styles.input, styles.remarkInput]}
+                value={settingsRemark}
+                onChangeText={setSettingsRemark}
+                placeholder="无"
+                placeholderTextColor="#999"
+                multiline
+                maxLength={255}
+              />
+              <View style={styles.modalActions}>
+                <Pressable
+                  style={styles.cancelButton}
+                  onPress={() => {
+                    setSchedulePicker(null);
+                    setSettingsOrder(null);
+                  }}
+                >
+                  <Text style={styles.cancelButtonText}>取消</Text>
+                </Pressable>
+                <Pressable style={[styles.solidButton, styles.flexButton]} onPress={confirmOrderSettings}>
+                  <Text style={styles.solidButtonText}>保存</Text>
+                </Pressable>
+              </View>
+            </Pressable>
+          </Pressable>
+        </View>
+      </Modal>
+      {schedulePicker && settingsOrder ? (
+        <DateTimePicker
+          value={schedulePickerDate(settingsDate, settingsTime)}
+          mode={schedulePicker}
+          display="default"
+          is24Hour
+          positiveButton={{ label: '确定', textColor: ACCENT }}
+          negativeButton={{ label: '取消', textColor: '#666' }}
+          onChange={onSchedulePicked}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -1096,6 +1246,20 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' },
   loginPage: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#fff' },
   loginCard: { gap: 14 },
+  rememberRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  checkbox: {
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  checkboxOn: { borderColor: ACCENT, backgroundColor: ACCENT },
+  checkboxMark: { color: '#fff', fontSize: 12, fontWeight: '700', lineHeight: 14 },
+  rememberText: { color: '#333', fontSize: 15 },
   brand: { fontSize: 28, fontWeight: '700', color: '#222', textAlign: 'center' },
   muted: { color: '#888', fontSize: 13 },
   mutedCenter: { color: '#888', fontSize: 13, textAlign: 'center', marginBottom: 8 },
@@ -1193,6 +1357,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     gap: 6,
   },
+  orderRowAlt: {
+    backgroundColor: '#f3f4f6',
+  },
   orderTime: { color: '#999', fontSize: 13 },
   addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
   orderAddress: { flex: 1, color: '#222', fontSize: 16, fontWeight: '700', lineHeight: 22 },
@@ -1270,10 +1437,19 @@ const styles = StyleSheet.create({
     borderColor: '#ddd',
     borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 11,
-    backgroundColor: '#fff',
+    paddingVertical: 10,
     fontSize: 16,
+    color: '#222',
+    backgroundColor: '#fafafa',
   },
+  scheduleChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  scheduleInputs: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  scheduleDateInput: { flex: 1.4 },
+  scheduleTimeInput: { flex: 1 },
+  schedulePicker: { justifyContent: 'center' },
+  schedulePickerText: { color: '#222', fontSize: 16 },
+  schedulePickerPlaceholder: { color: '#999', fontSize: 16 },
+  remarkInput: { minHeight: 72, textAlignVertical: 'top', marginTop: 8 },
   label: { color: '#333', fontWeight: '600', marginTop: 8 },
   empty: { textAlign: 'center', marginTop: 80, color: '#999' },
   listLoading: { paddingVertical: 16, alignItems: 'center', gap: 8 },
@@ -1290,6 +1466,15 @@ const styles = StyleSheet.create({
   moreBrand: { fontSize: 28, fontWeight: '700', color: '#222', marginBottom: 8 },
   moreLine: { fontSize: 16, color: '#333' },
   moreMeta: { fontSize: 13, color: '#999', marginTop: 4 },
+  autoLoginRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    alignSelf: 'stretch',
+    marginTop: 8,
+    paddingVertical: 8,
+  },
+  autoLoginOn: { fontSize: 14, color: ACCENT, fontWeight: '600' },
   logoutButton: {
     backgroundColor: ACCENT,
     borderRadius: 8,

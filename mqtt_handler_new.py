@@ -176,6 +176,7 @@ class WaterDeliveryOrder(Base):
     source = Column(String(20), nullable=False, default="auto")
     status = Column(String(20), nullable=False, default="pending")
     payment_status = Column(String(20), nullable=False, default="unpaid")
+    scheduled_at = Column(DateTime, nullable=True)
     requested_quantity = Column(Integer, nullable=False)
     delivered_quantity = Column(Integer)
     trigger_quantity = Column(Integer, nullable=False)
@@ -289,7 +290,7 @@ def create_auto_water_order(db, shelf):
         requested_quantity=max(int(shelf.total_quantity or 0) - int(shelf.current_quantity or 0), 1),
         trigger_quantity=shelf.current_quantity,
         active_key=active_key,
-        remark="库存达到预警值，MQTT自动生成",
+        remark="",
         created_by="mqtt_handler",
         updated_by="mqtt_handler"
     )
