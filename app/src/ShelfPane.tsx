@@ -15,6 +15,7 @@ import {
   Text,
   TextInput,
   View,
+  type ViewStyle,
 } from 'react-native';
 import {
   createShelf,
@@ -159,6 +160,28 @@ function countFilters(filters: ShelfFilters) {
   return count;
 }
 
+function FormField({
+  label,
+  required = false,
+  children,
+  style,
+}: {
+  label: string;
+  required?: boolean;
+  children: React.ReactNode;
+  style?: ViewStyle;
+}) {
+  return (
+    <View style={[styles.formField, style]}>
+      <Text style={styles.formLabel}>
+        {label}
+        {required ? <Text style={styles.requiredMark}> *</Text> : null}
+      </Text>
+      {children}
+    </View>
+  );
+}
+
 function Chip({
   label,
   active,
@@ -200,7 +223,6 @@ export function ShelfPane({
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [picker, setPicker] = useState<'filterCity' | 'filterStation' | 'formCity' | 'formStation' | null>(null);
   const [form, setForm] = useState<ShelfForm | null>(null);
-  const [formMore, setFormMore] = useState(false);
   const [expiryPicker, setExpiryPicker] = useState(false);
   const [logTitle, setLogTitle] = useState('');
   const [logLines, setLogLines] = useState<string[] | null>(null);
@@ -316,7 +338,6 @@ export function ShelfPane({
 
   const openCreate = () => {
     setForm(emptyForm());
-    setFormMore(false);
   };
 
   const openEdit = (shelf: Shelf) => {
@@ -343,7 +364,6 @@ export function ShelfPane({
       signal_strength: String(shelf.signal_strength ?? 0),
       version: shelf.version || '',
     });
-    setFormMore(false);
   };
 
   const saveForm = async () => {
@@ -703,52 +723,89 @@ export function ShelfPane({
             <Pressable onPress={saveForm}><Text style={styles.addText}>保存</Text></Pressable>
           </View>
           <ScrollView contentContainerStyle={styles.formBody} keyboardShouldPersistTaps="handled">
-            <Text style={styles.fieldLabel}>基本信息</Text>
-            <TextInput style={styles.input} placeholder="设备号" placeholderTextColor="#999" value={form?.iccid} onChangeText={value => setForm(current => current ? { ...current, iccid: value } : current)} />
-            <View style={styles.chipRow}>
-              <Chip label="货架" active={form?.device_type === 'shelf'} onPress={() => setForm(current => current ? { ...current, device_type: 'shelf' } : current)} />
-              <Chip label="茶吧机" active={form?.device_type === 'tea_bar'} onPress={() => setForm(current => current ? { ...current, device_type: 'tea_bar' } : current)} />
+            <FormField label="设备号 (ICCID)" required>
+              <TextInput style={styles.input} placeholder="请输入设备号" placeholderTextColor="#999" value={form?.iccid} onChangeText={value => setForm(current => current ? { ...current, iccid: value } : current)} />
+            </FormField>
+            <FormField label="设备类型" required>
+              <View style={styles.chipRow}>
+                <Chip label="货架" active={form?.device_type === 'shelf'} onPress={() => setForm(current => current ? { ...current, device_type: 'shelf' } : current)} />
+                <Chip label="茶吧机" active={form?.device_type === 'tea_bar'} onPress={() => setForm(current => current ? { ...current, device_type: 'tea_bar' } : current)} />
+              </View>
+            </FormField>
+            <View style={styles.formPair}>
+              <FormField label="所在城市" style={styles.formHalf}>
+                <Pressable style={styles.formSelect} onPress={() => setPicker('formCity')}>
+                  <Text style={form?.cityId ? styles.selectText : styles.selectPlaceholder}>{form?.cityId ? cityName(form.cityId) : '请选择'}</Text>
+                </Pressable>
+              </FormField>
+              <FormField label="所属站点" required style={styles.formHalf}>
+                <Pressable style={[styles.formSelect, !form?.cityId && styles.selectDisabled]} onPress={() => form?.cityId && setPicker('formStation')}>
+                  <Text style={form?.stationId ? styles.selectText : styles.selectPlaceholder}>{form?.stationId ? stationName(form.stationId, formStations, '请选择') : '请选择'}</Text>
+                </Pressable>
+              </FormField>
             </View>
-            <TextInput style={styles.input} placeholder="产品名称" placeholderTextColor="#999" value={form?.product_name} onChangeText={value => setForm(current => current ? { ...current, product_name: value } : current)} />
-            <Pressable style={styles.select} onPress={() => setPicker('formCity')}>
-              <Text style={styles.selectText}>{form?.cityId ? cityName(form.cityId) : '选择城市'}</Text>
-            </Pressable>
-            <Pressable style={styles.select} onPress={() => form?.cityId && setPicker('formStation')}>
-              <Text style={styles.selectText}>{form?.stationId ? stationName(form.stationId, formStations, '选择站点') : '选择站点'}</Text>
-            </Pressable>
-            <TextInput style={styles.input} placeholder="微信" placeholderTextColor="#999" value={form?.wechat} onChangeText={value => setForm(current => current ? { ...current, wechat: value } : current)} />
-            <TextInput style={styles.input} placeholder="电话" placeholderTextColor="#999" value={form?.phone} onChangeText={value => setForm(current => current ? { ...current, phone: value } : current)} />
-            <TextInput style={styles.input} placeholder="地址" placeholderTextColor="#999" value={form?.address} onChangeText={value => setForm(current => current ? { ...current, address: value } : current)} />
-            <View style={styles.fieldRow}>
-              <TextInput style={styles.rangeInput} placeholder="总量" placeholderTextColor="#999" keyboardType="number-pad" value={form?.total_quantity} onChangeText={value => setForm(current => current ? { ...current, total_quantity: value } : current)} />
-              <TextInput style={styles.rangeInput} placeholder="订购数" placeholderTextColor="#999" keyboardType="number-pad" value={form?.order_quantity} onChangeText={value => setForm(current => current ? { ...current, order_quantity: value } : current)} />
-              <TextInput style={styles.rangeInput} placeholder="预警" placeholderTextColor="#999" keyboardType="number-pad" value={form?.warning_quantity} onChangeText={value => setForm(current => current ? { ...current, warning_quantity: value } : current)} />
+            <FormField label="产品名称" required>
+              <TextInput style={styles.input} placeholder="请输入产品名称" placeholderTextColor="#999" value={form?.product_name} onChangeText={value => setForm(current => current ? { ...current, product_name: value } : current)} />
+            </FormField>
+            <View style={styles.formPair}>
+              <FormField label="微信号" required style={styles.formHalf}>
+                <TextInput style={styles.input} placeholder="请输入微信号" placeholderTextColor="#999" value={form?.wechat} onChangeText={value => setForm(current => current ? { ...current, wechat: value } : current)} />
+              </FormField>
+              <FormField label="电话" required style={styles.formHalf}>
+                <TextInput style={styles.input} placeholder="请输入电话" placeholderTextColor="#999" keyboardType="phone-pad" value={form?.phone} onChangeText={value => setForm(current => current ? { ...current, phone: value } : current)} />
+              </FormField>
+            </View>
+            <FormField label="地址" required>
+              <TextInput style={styles.input} placeholder="请输入地址" placeholderTextColor="#999" value={form?.address} onChangeText={value => setForm(current => current ? { ...current, address: value } : current)} />
+            </FormField>
+            <View style={styles.formPair}>
+              <FormField label="货架总量" style={styles.formHalf}>
+                <TextInput style={styles.input} keyboardType="number-pad" value={form?.total_quantity} onChangeText={value => setForm(current => current ? { ...current, total_quantity: value } : current)} />
+              </FormField>
+              <FormField label="预警数量" style={styles.formHalf}>
+                <TextInput style={styles.input} keyboardType="number-pad" value={form?.warning_quantity} onChangeText={value => setForm(current => current ? { ...current, warning_quantity: value } : current)} />
+              </FormField>
+              <FormField label="单次订购" style={styles.formHalf}>
+                <TextInput style={styles.input} keyboardType="number-pad" value={form?.order_quantity} onChangeText={value => setForm(current => current ? { ...current, order_quantity: value } : current)} />
+              </FormField>
             </View>
             {form?.device_type === 'tea_bar' ? (
-              <TextInput style={styles.input} placeholder="当前余量" placeholderTextColor="#999" keyboardType="number-pad" value={form.current_quantity} onChangeText={value => setForm(current => current ? { ...current, current_quantity: value } : current)} />
+              <FormField label="当前库存" required>
+                <TextInput style={styles.input} keyboardType="number-pad" value={form.current_quantity} onChangeText={value => setForm(current => current ? { ...current, current_quantity: value } : current)} />
+                <Text style={styles.formHint}>茶吧机库存可手动填写，MQTT 按 1→0 自动扣减。</Text>
+              </FormField>
             ) : null}
-            <TextInput style={styles.input} placeholder="流量卡号" placeholderTextColor="#999" value={form?.sim_card_number} onChangeText={value => setForm(current => current ? { ...current, sim_card_number: value } : current)} />
-            <Pressable style={styles.select} onPress={() => setExpiryPicker(true)}>
-              <Text style={styles.selectText}>{form?.sim_card_expiry || '流量卡到期日'}</Text>
-            </Pressable>
-            <Pressable onPress={() => setFormMore(open => !open)}>
-              <Text style={styles.addText}>{formMore ? '收起更多' : '更多信息'}</Text>
-            </Pressable>
-            {formMore ? (
-              <View style={styles.moreBox}>
-                <View style={styles.chipRow}>
-                  {['', '未支付', '已联系'].map(value => (
-                    <Chip key={`form-pay-${value || 'empty'}`} label={value || '支付不填'} active={form?.payment_method === value} onPress={() => setForm(current => current ? { ...current, payment_method: value } : current)} />
-                  ))}
-                </View>
-                <TextInput style={styles.input} placeholder="备注" placeholderTextColor="#999" value={form?.remark} onChangeText={value => setForm(current => current ? { ...current, remark: value } : current)} />
-                <View style={styles.fieldRow}>
-                  <TextInput style={styles.rangeInput} placeholder="电压" placeholderTextColor="#999" keyboardType="decimal-pad" value={form?.voltage} onChangeText={value => setForm(current => current ? { ...current, voltage: value } : current)} />
-                  <TextInput style={styles.rangeInput} placeholder="信号" placeholderTextColor="#999" keyboardType="number-pad" value={form?.signal_strength} onChangeText={value => setForm(current => current ? { ...current, signal_strength: value } : current)} />
-                </View>
-                <TextInput style={styles.input} placeholder="版本" placeholderTextColor="#999" value={form?.version} onChangeText={value => setForm(current => current ? { ...current, version: value } : current)} />
+            <View style={styles.formPair}>
+              <FormField label="流量卡号" required style={styles.formHalf}>
+                <TextInput style={styles.input} placeholder="请输入流量卡号" placeholderTextColor="#999" value={form?.sim_card_number} onChangeText={value => setForm(current => current ? { ...current, sim_card_number: value } : current)} />
+              </FormField>
+              <FormField label="流量卡到期日" required style={styles.formHalf}>
+                <Pressable style={styles.formSelect} onPress={() => setExpiryPicker(true)}>
+                  <Text style={form?.sim_card_expiry ? styles.selectText : styles.selectPlaceholder}>{form?.sim_card_expiry || '请选择'}</Text>
+                </Pressable>
+              </FormField>
+            </View>
+            <FormField label="支付状态">
+              <View style={styles.chipRow}>
+                {['', '未支付', '已联系'].map(value => (
+                  <Chip key={`form-pay-${value || 'empty'}`} label={value || '不填'} active={form?.payment_method === value} onPress={() => setForm(current => current ? { ...current, payment_method: value } : current)} />
+                ))}
               </View>
-            ) : null}
+            </FormField>
+            <FormField label="备注">
+              <TextInput style={[styles.input, styles.remarkInput]} placeholder="请输入备注" placeholderTextColor="#999" multiline value={form?.remark} onChangeText={value => setForm(current => current ? { ...current, remark: value } : current)} />
+            </FormField>
+            <View style={styles.formPair}>
+              <FormField label="电压" style={styles.formHalf}>
+                <TextInput style={styles.input} keyboardType="decimal-pad" value={form?.voltage} onChangeText={value => setForm(current => current ? { ...current, voltage: value } : current)} />
+              </FormField>
+              <FormField label="信号" style={styles.formHalf}>
+                <TextInput style={styles.input} keyboardType="number-pad" value={form?.signal_strength} onChangeText={value => setForm(current => current ? { ...current, signal_strength: value } : current)} />
+              </FormField>
+            </View>
+            <FormField label="版本">
+              <TextInput style={styles.input} placeholder="请输入版本" placeholderTextColor="#999" value={form?.version} onChangeText={value => setForm(current => current ? { ...current, version: value } : current)} />
+            </FormField>
           </ScrollView>
         </View>
       </Modal>
@@ -868,8 +925,16 @@ const styles = StyleSheet.create({
   formPage: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'android' ? 28 : 48 },
   formHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 8 },
   formTitle: { fontSize: 16, fontWeight: '700', color: '#222' },
-  formBody: { padding: 16, gap: 8, paddingBottom: 40 },
-  input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: '#222' },
-  moreBox: { gap: 8 },
+  formBody: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 48, gap: 14 },
+  formField: { gap: 6 },
+  formLabel: { color: '#334155', fontSize: 14, fontWeight: '600' },
+  requiredMark: { color: '#e54d42' },
+  formPair: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  formHalf: { flex: 1 },
+  formSelect: { borderWidth: 1, borderColor: '#ddd', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 10, backgroundColor: '#fafafa' },
+  selectPlaceholder: { color: '#999', fontSize: 14 },
+  formHint: { color: '#888', fontSize: 12, lineHeight: 18 },
+  input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: '#222', backgroundColor: '#fff' },
+  remarkInput: { minHeight: 72, textAlignVertical: 'top' },
   logLine: { color: '#333', fontSize: 14, paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#eee' },
 });
